@@ -1,0 +1,42 @@
+# ============================
+# Docker Compose 全域配置開始
+# ============================
+# 1. 定義 Docker Compose 檔案格式版本，確保與 Docker Engine 的相容性
+version: '3.8'
+# ============================
+# Docker Compose 全域配置結束
+# ============================
+
+
+# ============================
+# 服務架構 (Services) 定義開始
+# ============================
+services:
+  interview-bot:
+    # 1. 映像檔建置與容器命名
+    build: . # 指定以當前目錄 (根目錄) 的 Dockerfile 進行映像檔建置
+    container_name: xuya-ai-assistant # 明確指定容器名稱，方便後續透過 CLI 管理與監控
+
+    # 2. 網路通訊埠映射 (Port Mapping)
+    ports:
+      - "5000:5000" # 將宿主機 (Host) 的 5000 埠映射至容器內部的 5000 埠 (Flask 預設通訊埠)
+
+    # 3. 資料持久化掛載 (Volume Mounting)
+    volumes:
+      # 將本機的向量資料庫與 SQLite 歷史紀錄掛載至容器內部
+      # 此為系統核心架構：確保容器在銷毀、重啟或升級時，對話記憶與 ChromaDB 索引資料絕對不會遺失 (Data Persistence)
+      # 這樣即使貨櫃刪除重建，使用者的聊天紀錄跟 ChromaDB 向量也不會消失！
+      - ./xuya_vdb:/app/xuya_vdb
+
+    # 4. 系統環境變數注入 (Environment Variables)
+    environment:
+      # 網路橋接設定：讓容器內的 Python 服務能透過 host.docker.internal 穿透容器網路，精準存取宿主機上運行的 Ollama
+      # 告訴 Docker 內的 Python，去「宿主機 (你的電腦)」的 11434 Port 找 Ollama
+      - OLLAMA_API_BASE_URL=http://host.docker.internal:11434
+      
+      # 硬體資源隔離：強制關閉容器內的 CUDA 偵測，避免在無 GPU 穿透 (NVIDIA Container Toolkit) 的環境下引發初始化報錯，將底層算力統一交由宿主機的 Ollama 處理
+      # 避免在沒有顯示卡的環境下報錯
+      - CUDA_VISIBLE_DEVICES=""
+# ============================
+# 服務架構 (Services) 定義結束
+# ============================

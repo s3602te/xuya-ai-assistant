@@ -1,0 +1,22 @@
+# 資安與環境變數 = 資安問題不能上傳QQ
+.env
+cert.pem
+key.pem
+
+# 虛擬環境與編譯檔 = 沒必要上傳
+myai/
+__pycache__/
+*.pyc
+
+# 執行檔與靜態打包 = 沒必要上傳
+ngrok.exe
+dist/
+
+# 資料庫實體檔案 (只防實體檔，不防 .py 腳本與 csv)
+xuya_vdb/chroma_storage/
+xuya_vdb/*.db
+test-bot.rar
+
+# 忽略 PDF，但允許保留空資料夾結構 用的是 .gitkeep
+pdf_inbox/*.pdf
+pdf_archive/*.pdf
