@@ -1,0 +1,23 @@
+name: Xuya AI CI/CD Pipeline
+
+# 觸發條件 (Triggers)：定義什麼時候要啟動這個自動化流程
+on:
+  push:
+    branches:
+      - main # 只要有任何程式碼被 push 到 main 分支，就會觸發
+
+# 任務清單 (Jobs)：定義 GitHub 借給你的雲端機器人要做什麼事
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest # GitHub 會免費開一台乾淨的 Ubuntu 伺服器來跑任務
+
+    steps:
+      # 步驟 1：把 GitHub 倉庫裡的最新程式碼下載到這台 Ubuntu 伺服器上
+      - name: 📥 檢出程式碼 (Checkout)
+        uses: actions/checkout@v4
+
+      # 步驟 2：測試印出訊息 (之後這裡會替換成真實的打包與部署指令)
+      - name: 🚀 執行 CI/CD 流程
+        run: |
+          echo "GitHub Action 成功偵測到 Push！"
+          echo "這裡未來將會執行 npm run build 與 docker-compose up -d"
