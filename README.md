@@ -17,3 +17,28 @@
 * **後端與架構：** Python (Flask), SQLite, Threading (多執行緒狀態機)
 * **AI 應用：** Ollama (LLM & Vision), ChromaDB (Vector DB), SentenceTransformers
 * **系統整合：** LINE Messaging API (Webhook), RESTful API
+
+---
+
+## 伺服器部署指南 (生產環境)
+
+本專案已導入 GitHub Actions CI/CD 自動化流水線。當程式碼推送到 main 分支時，系統會自動編譯前端並建置最新版 Docker 映像檔至 Docker Hub。
+
+### 首次一鍵部署
+請於目標伺服器執行以下步驟：
+
+1. 確保伺服器已安裝 **Docker** (或 Docker Desktop) 與 **Docker Compose**。
+2. 確保伺服器已安裝 **Ollama**，並建立好對應的 AI 模型大腦 (需命名為 XUYA:latest)。
+3. 將本專案根目錄的 docker-compose.prod.yml 下載至伺服器的空資料夾中。
+4. 將包含知識庫的 xuya_vdb 資料夾放入同一個目錄。
+5. 開啟終端機，執行以下指令啟動系統：
+   docker-compose -f docker-compose.prod.yml up -d
+
+### 系統更新與快取機制 (Pull)
+當 GitHub 倉庫有更新，且 CI/CD 流程執行完畢後，伺服器端只需執行以下指令即可無縫更新（受惠於 Docker 分層快取，更新過程將極為快速）：
+
+1. 抓取雲端最新映像檔 (僅下載有差異的檔案層)：
+docker-compose -f docker-compose.prod.yml pull
+
+2. 重新啟動容器套用更新 (舊容器會自動被替換)：
+docker-compose -f docker-compose.prod.yml up -d

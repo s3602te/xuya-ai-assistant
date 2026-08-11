@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  interview-bot:
+    # 這裡不自己 build 了，直接去 Docker Hub 抓我推上去的映像檔 images
+    image: s3602te/xuya-ai-assistant:latest
+    container_name: xuya-ai-assistant
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./xuya_vdb:/app/xuya_vdb
+    environment:
+      - OLLAMA_API_BASE_URL=http://host.docker.internal:11434
+      - CUDA_VISIBLE_DEVICES=""
