@@ -6,18 +6,40 @@ on:
     branches:
       - main # 只要有任何程式碼被 push 到 main 分支，就會觸發
 
-# 任務清單 (Jobs)：定義 GitHub 借給你的雲端機器人要做什麼事
 jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest # GitHub 會免費開一台乾淨的 Ubuntu 伺服器來跑任務
+  build-and-test:
+    runs-on: ubuntu-latest # 使用 GitHub 免費提供的 Ubuntu 伺服器
 
     steps:
-      # 步驟 1：把 GitHub 倉庫裡的最新程式碼下載到這台 Ubuntu 伺服器上
+      # 1. 取得最新程式碼把 GitHub 倉庫裡的最新程式碼下載到這台 Ubuntu 伺服器上
       - name: 📥 檢出程式碼 (Checkout)
         uses: actions/checkout@v4
 
-      # 步驟 2：測試印出訊息 (之後這裡會替換成真實的打包與部署指令)
-      - name: 🚀 執行 CI/CD 流程
+      # 2. 準備 Node.js 環境 (用來編譯 React 前端)
+      - name: ⚙️ 設定 Node.js 環境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # 指定 Node.js 版本
+
+      # 3. 進入前端資料夾，安裝套件並編譯
+      - name: 📦 安裝前端套件與編譯 (npm build)
+        working-directory: ./my-aics
         run: |
-          echo "GitHub Action 成功偵測到 Push！"
-          echo "這裡未來將會執行 npm run build 與 docker-compose up -d"
+          npm install
+          npm run build
+
+      # 4. CI 核心：將編譯好的前端丟給後端 (自動化搬運)
+      - name: 🚚 整合前端靜態檔至後端目錄
+        run: |
+          # 刪除後端舊的 dist (如果存在)
+          rm -rf ./my-aics-backend/dist
+          # 將前端剛編譯好的 dist 搬移到後端目錄
+          mv ./my-aics/dist ./my-aics-backend/dist
+          echo "✅ 前端靜態網頁已成功整合至 Flask 後端目錄！"
+
+      # 5. 防呆測試：讓 Docker 試著包裝一次，確保程式碼沒壞
+      - name: 🐳 測試後端 Docker 映像檔建置 (CI 測試)
+        working-directory: ./my-aics-backend
+        run: |
+          docker build -t xuya-ai-backend-test .
+          echo "✅ Docker 建置測試通過，程式碼健康度 100%！"
