@@ -11,24 +11,27 @@ jobs:
     runs-on: ubuntu-latest # 使用 GitHub 免費提供的 Ubuntu 伺服器
 
     steps:
-      # 1. 取得最新程式碼把 GitHub 倉庫裡的最新程式碼下載到這台 Ubuntu 伺服器上
+      # ==========================================
+      # CI 持續整合區塊開始
+      # ==========================================
+      # 1. 環境準備：取得最新程式碼把 GitHub 倉庫裡的最新程式碼下載到這台 Ubuntu 伺服器上
       - name: 📥 檢出程式碼 (Checkout)
         uses: actions/checkout@v4
 
-      # 2. 準備 Node.js 環境 (用來編譯 React 前端)
+      # 2. 環境準備：準備 Node.js 環境 (用來編譯 React 前端)
       - name: ⚙️ 設定 Node.js 環境
         uses: actions/setup-node@v4
         with:
           node-version: '20' # 指定 Node.js 版本
 
-      # 3. 進入前端資料夾，安裝套件並編譯
+      # 3. 環境建置(CI 核心)：進入前端資料夾，安裝套件並編譯
       - name: 📦 安裝前端套件與編譯 (npm build)
         working-directory: ./my-aics
         run: |
           npm install
           npm run build
 
-      # 4. CI 核心：將編譯好的前端丟給後端 (自動化搬運)
+      # 4. 環境建置(CI 核心)：將編譯好的前端丟給後端 (前端dist自動化搬運到後端)
       - name: 🚚 整合前端靜態檔至後端目錄
         run: |
           # 刪除後端舊的 dist (如果存在)
@@ -37,9 +40,34 @@ jobs:
           mv ./my-aics/dist ./my-aics-backend/dist
           echo "✅ 前端靜態網頁已成功整合至 Flask 後端目錄！"
 
-      # 5. 防呆測試：讓 Docker 試著包裝一次，確保程式碼沒壞
+      # 5. 防呆自動化測試：讓 Docker 試著打包一次，確保程式碼沒壞
       - name: 🐳 測試後端 Docker 映像檔建置 (CI 測試)
         working-directory: ./my-aics-backend
         run: |
           docker build -t xuya-ai-backend-test .
           echo "✅ Docker 建置測試通過，程式碼健康度 100%！"
+      # ==========================================
+      # CI 持續整合區塊結束
+      # ==========================================
+
+      # ==========================================
+      # CD 持續整合區塊開始
+      # ==========================================
+      # 6. 登入 Docker Hub (呼叫你剛剛設定的 GitHub Secrets 機密)
+      - name: 🔐 登入 Docker Hub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      # 7. 正式打包並推送到 Docker Hub 倉庫
+      - name: 🚀 建置並推送正式版 Docker 映像檔
+        working-directory: ./my-aics-backend
+        run: |
+          # 打包並貼上標籤 (你的帳號/專案名稱:最新版)
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/xuya-ai-assistant:latest .
+          
+          # 將打包好的映像檔正式推送到 Docker Hub
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/xuya-ai-assistant:latest
+          
+          echo "🎉 成功推送至 Docker Hub！"
+      # ==========================================
+      # CD 持續整合區塊結束
+      # ==========================================
