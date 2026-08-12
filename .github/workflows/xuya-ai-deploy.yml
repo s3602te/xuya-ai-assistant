@@ -5,6 +5,11 @@ on:
   push:
     branches:
       - main # 只要有任何程式碼被 push 到 main 分支，就會觸發
+      # 路徑過濾： 只有前端、後端或 CI/CD 腳本本身的實質異動，才會觸發高成本的 Docker 打包
+    paths:
+      - 'my-aics/**'
+      - 'my-aics-backend/**'
+      - '.github/workflows/**'
 
 jobs:
   build-and-test:
