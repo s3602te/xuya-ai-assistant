@@ -79,7 +79,7 @@ export default function PageController() {
                 : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
             }`}
           >
-            💬 專屬 AI 聊天室 (App)
+            💬 專屬 AI 聊天室
           </button>
 
           <button 
@@ -90,7 +90,7 @@ export default function PageController() {
                 : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
             }`}
           >
-            🚀 現代 UI 展示 (App1)
+            🚀 架構使用技術展示
           </button>
 
           <button 
@@ -101,7 +101,7 @@ export default function PageController() {
                 : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
             }`}
           >
-            🎨 傳統 CSS 測試 (App2)
+            🎨 Docker CI/CD展示
           </button>
         </div>
       )}

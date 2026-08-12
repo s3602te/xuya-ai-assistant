@@ -2,9 +2,9 @@
 // 元件與靜態資源引入開始
 // ============================
 import { useState, useEffect, useRef } from 'react'
-import mermaid from 'mermaid'                                                   // 1. 引入 mermaid 套件，用於渲染動態架構圖
-import archImageV1 from './assets/創群LINE架構.png' // 2. 匯入 V1.0 靜態圖片資源
-import archImageV2 from './assets/我的LINE架構.png'                               // 3. 【修復】改用 PNG 格式，解決 SVG 透明背景在深色模式下變成全黑的問題
+import mermaid from 'mermaid'                       // 1. 引入 mermaid 套件，用於渲染動態架構圖
+import archImageV1 from './assets/ivtc-line-architecture.png' // 2. 匯入 V1.0 靜態圖片資源
+import archImageV2 from './assets/my-line-architecture.png' // 3. 【修復】改用 PNG 格式，解決 SVG 透明背景在深色模式下變成全黑的問題
 // ============================
 // 元件與靜態資源引入結束
 // ============================

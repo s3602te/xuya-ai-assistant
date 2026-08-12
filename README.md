@@ -3,7 +3,7 @@
 此專案為解決企業既有知識庫稀疏、傳統客服機器人回覆不精準的痛點，主導規劃並從零開發具備 RAG (檢索增強生成) 能力的 LINE AI 客服系統。
 
 ## 系統架構圖
-![系統架構圖](my-aics/src/assets/創群LINE架構.png)
+![系統架構圖](my-aics/src/assets/ivtc-line-architecture.png)
 
 ## 核心技術與亮點
 
