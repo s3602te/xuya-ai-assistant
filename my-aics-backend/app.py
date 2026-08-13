@@ -9,38 +9,29 @@ import requests
 import time
 import threading 
 import atexit 
-import sqlite3  # 引入輕量級關聯式資料庫，用於持久化對話記憶
-import uuid     # 用於動態生成獨一無二的對話 Session ID
+import uuid
 from datetime import datetime
 
-# 引入 Flask 相關套件與 CORS
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
-# 引入 dotenv 來讀取載入環境變數套件 .env 檔案
-from dotenv import load_dotenv 
-
 import pandas as pd
 from sentence_transformers import SentenceTransformer
-# import faiss
-import chromadb
 import numpy as np
 import torch
 # ============================
 # 核心模組與套件引入結束
 # ============================
 
+# ============================
+# 模組化引入區塊 (取代原本冗長的設定與資料庫)
+# ============================
+from config import *
+from database import get_db_connection, collection_manual, collection_auto
 
 # ============================
 # 環境變數與全域初始化開始
 # ============================
-# 1. 載入 .env 檔案中的機密環境變數
-load_dotenv() 
-
-# 2. 取得目前 app.py 所在的資料夾路徑，定義系統根目錄絕對路徑
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# 3. 裝置硬體偵測函式 (優先使用 GPU CUDA，若無則降級為 CPU)
 def pick_device():
     try:
         if torch.cuda.is_available():
@@ -56,119 +47,14 @@ def pick_device():
 
 DEVICE = pick_device()
 
-# 4. 初始化 Flask 應用程式，並將靜態網頁路由指向 dist 資料夾，路徑直接從根目錄開始
 app = Flask(__name__, static_folder='dist', static_url_path='')
-CORS(app) # 開啟 CORS 允許前端 React 跨域連線
+CORS(app) 
 # ============================
 # 環境變數與全域初始化結束
 # ============================
 
-
 # ============================
-# 系統參數與路徑設定開始
-# ============================
-# 1. Ollama AI 引擎 API 位址
-OLLAMA_API_BASE_URL = os.getenv("OLLAMA_API_BASE_URL", "http://localhost:11434")
-
-# 2. IIS 伺服器與 LINE Bot 串接相關設定
-# 改用 os.getenv() 從 .env 檔案中抓取機密資料 如果 .env 裡面找不到，才會使用後面的預設值
-IIS_SEND_URL = os.getenv("IIS_SEND_URL", "")
-IIS_API_USER_ID = os.getenv("IIS_API_USER_ID", "")
-LINE_INTERNAL_GROUP_ID = os.getenv("LINE_INTERNAL_GROUP_ID", "")
-
-# 3. 本機資料庫存放路徑設定 (使用動態相對路徑確保跨平台相容)
-DB_PATH = os.path.join(BASE_DIR, "xuya_vdb", "chroma_storage")           # ChromaDB 向量資料庫路徑
-CHAT_DB_PATH = os.path.join(BASE_DIR, "xuya_vdb", "chat_history.db")     # SQLite 歷史對話紀錄路徑
-EMBEDDING_MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
-TOP_K = 6
-# ============================
-# 系統參數與路徑設定結束
-# ============================
-
-
-# ============================
-# SQLite 資料庫初始化區塊開始
-# ============================
-def init_chat_db():
-    # 1. 建立連線並初始化資料表
-    conn = sqlite3.connect(CHAT_DB_PATH)
-    c = conn.cursor()
-    
-    # 2. 建立 Sessions 表格：負責存放左側邊欄的對話清單與訪客綁定 (user_id)
-    c.execute('''CREATE TABLE IF NOT EXISTS sessions
-                 (id TEXT PRIMARY KEY, user_id TEXT, title TEXT, updated_at DATETIME)''')
-                 
-    # 3. 建立 Messages 表格：負責存放每一回合的詳細對話內容
-    c.execute('''CREATE TABLE IF NOT EXISTS messages
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, created_at DATETIME)''')
-    conn.commit()
-    conn.close()
-    print("[系統] ✅ SQLite 歷史對話資料庫初始化完成！")
-
-# 伺服器啟動時強制執行一次資料庫結構檢查與初始化
-init_chat_db()
-
-# 建立資料庫連線工具函式 (設定 row_factory 方便以字典格式存取資料)
-def get_db_connection():
-    conn = sqlite3.connect(CHAT_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-# ============================
-# SQLite 資料庫初始化區塊結束
-# ============================
-
-
-# ============================
-# 業務邏輯規則與防護網設定開始
-# ============================
-# 1. 超時時間與統編正則驗證設定
-HANDOFF_TIMEOUT_SECONDS = 600       
-TAXID_COLLECTION_TIMEOUT_SECONDS = 30 
-TAX_ID_PATTERN = r"^[0-9]{8}$"
-
-# 2. 各類意圖偵測關鍵字 (正則表達式)
-HANDOFF_PATTERNS = [r"真人客服", r"人工客服", r"轉.*?人工", r"轉.*?客服", r"不要\s*ai", r"我要真人", r"找真人", r"人類", r"不要\s*機器人"]
-CONFIRM_YES_PATTERNS = [r"^是$", r"^要$", r"^好$", r"^確定$", r"^ok$", r"^yes$", r"^要轉接$", r"^轉接$", r"^真人客服$", r"^人工客服$"]
-CONFIRM_NO_PATTERNS = [r"^否$", r"^不用$", r"^不要$", r"^先不用$", r"^取消$", r"^no$"]
-HANDOFF_CLEAR_PATTERN = r"(\#?真人接手|\#?humanon|\#?humaninoff)"
-AI_RESTART_PATTERNS_FROM_CLIENT = [r"解決完畢", r"以上內容", r"ai\s*開", r"ai\s*on", r"重啟\s*ai", r"好了", r"謝謝客服", r"!ai啟動", r"ai啟動"]
-
-# 3. 財務防護網設定 (極度嚴謹：偵測到以下字眼直接攔截，防止 AI 處理帳務問題)
-BILLING_PATTERNS = [
-    r"匯款", r"轉帳", r"付錢", r"付款", r"結帳", r"扣款", r"查收", r"匯給", r"退款", r"匯過去",
-    r"多少錢", r"帳戶", r"帳號", r"尾款", r"訂金", r"發票金額", r"報價", r"收費", r"存摺",
-    r"\d+\s*(元|塊|千|萬)" # 數字配上金錢單位
-]
-
-# 上班時間(週一至週五 09:00-18:00)與國定假日連假設定
-WORKING_HOURS_START = 9
-WORKING_HOURS_END = 18
-WORKING_DAYS = [0, 1, 2, 3, 4] 
-# YYYY-MM-DD 格式，只要命中此清單，系統將拒絕轉接真人
-# 只要日期出現在這裡，就會被視為「假日」，AI 會拒絕轉接真人
-HOLIDAYS = [
-    "2026-02-16", # 春節連假
-    "2026-02-17", # 除夕
-    "2026-02-18", # 春節
-    "2026-02-19", # 春節
-    "2026-02-20", # 春節
-    "2026-02-28", # 228紀念日
-    "2026-04-03", # 兒童節連假
-    "2026-04-06", # 清明節連假
-    "2026-05-01", # 勞動節
-    "2026-06-19", # 端午節
-    "2026-09-25", # 中秋節
-    "2026-09-28", # 教師節
-    "2026-10-09", # 國慶日連假
-    "2026-12-25", # 行憲紀念日
-]
-# ============================
-# 業務邏輯規則與防護網設定結束
-# ============================
-
-
-# ============================
-# 記憶體狀態與向量資料庫連線開始
+# 記憶體狀態與未解耦之模型連線開始
 # ============================
 # 1. 記憶體狀態變數 (用於記錄每個使用者的轉接進度與對話鎖定)
 human_handoff = {}       
@@ -177,47 +63,23 @@ handoff_collect_taxid = {}
 handoff_context = {}     
 human_lock = {}          
 handoff_start_times = {} 
-# 結構: { conv_key: { "push_target_id": str, "channel_id": str, "handoff_start_time": float, ... } }
 timeout_checker_stop = threading.Event()
 
 # 2. 載入 Embedding 模型用於自然語言向量化
 embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=DEVICE)
-# faiss_index = None
-# knowledge_data = None
 
-# 3. 初始化 ChromaDB 向量資料庫連線
-try:
-    print("[系統] 正在連接 ChromaDB 保險箱...")
-    chroma_client = chromadb.PersistentClient(path=DB_PATH)
+# (ChromaDB 連線已移至 database.py)
 
-    # 建立雙軌 RAG 系統：A 軌 (手動高精準) 與 B 軌 (自動擴展) 兩個抽屜
-    collection_manual = chroma_client.get_collection(name="xuya_qa_manual")
-    collection_auto = chroma_client.get_collection(name="xuya_qa_auto")
-
-    # 定義動態判定閾值 (數值越小，代表語意越相近)
-        # 建議初始值設為 1.0，後續可依實測狀況微調
-    ROUTING_THRESHOLD = 4.5 
-    
-    print("[系統] ✅ ChromaDB 雙軌知識庫連接成功！")
-except Exception as e:
-    print(f"[錯誤] 無法連接 ChromaDB: {e}")
-    collection_manual = None
-    collection_auto = None
-
-# 4. 短期記憶緩衝區配置 (限制回溯回合數與訊息截流秒數)
-MAX_HISTORY_TURNS = 2 # 限制僅記住最近 2 回合對話
+# 3. 短期記憶緩衝區配置 (限制回溯回合數與訊息截流秒數)
+MAX_HISTORY_TURNS = 2
 conversation_memory = {} 
-# { conv_key: [{"user": "...", "ai": "..."}, ...] }
 
-BUFFER_SECONDS = 5 # 文字訊息緩衝時間 (防碎語)
-IMAGE_BUFFER_SECONDS = 10 # 圖片訊息緩衝時間 (給予較長處理期)
+BUFFER_SECONDS = 5 
+IMAGE_BUFFER_SECONDS = 10 
 message_buffer = {} 
-# { conv_key: {"text": "...", "image": "...", "timer": Threading.Timer, "meta": {...}} }
-
 # ============================
-# 記憶體狀態與向量資料庫連線結束
+# 記憶體狀態與未解耦之模型連線結束
 # ============================
-
 
 # ============================
 # 核心工具函式區塊開始
