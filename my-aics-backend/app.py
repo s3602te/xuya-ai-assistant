@@ -16,9 +16,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 import pandas as pd
-from sentence_transformers import SentenceTransformer
 import numpy as np
-import torch
 # ============================
 # 核心模組與套件引入結束
 # ============================
@@ -28,25 +26,12 @@ import torch
 # ============================
 from config import *
 from database import get_db_connection, collection_manual, collection_auto
+# 3. 引入 AI 核心引擎
+from ai_core import search_knowledge, get_ollama_response, needs_contact_footer
 
 # ============================
 # 環境變數與全域初始化開始
 # ============================
-def pick_device():
-    try:
-        if torch.cuda.is_available():
-            _ = torch.randn(1, device='cuda') * 2
-            torch.cuda.synchronize()
-            print("[Device] Using CUDA")
-            return 'cuda'
-    except Exception as e:
-        print(f"[Device] CUDA 不可用，改用 CPU：{e}")
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    print("[Device] Using CPU")
-    return 'cpu'
-
-DEVICE = pick_device()
-
 app = Flask(__name__, static_folder='dist', static_url_path='')
 CORS(app) 
 # ============================
@@ -54,7 +39,7 @@ CORS(app)
 # ============================
 
 # ============================
-# 記憶體狀態與未解耦之模型連線開始
+# 記憶體狀態與未解耦之狀態機開始
 # ============================
 # 1. 記憶體狀態變數 (用於記錄每個使用者的轉接進度與對話鎖定)
 human_handoff = {}       
@@ -65,12 +50,7 @@ human_lock = {}
 handoff_start_times = {} 
 timeout_checker_stop = threading.Event()
 
-# 2. 載入 Embedding 模型用於自然語言向量化
-embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=DEVICE)
-
-# (ChromaDB 連線已移至 database.py)
-
-# 3. 短期記憶緩衝區配置 (限制回溯回合數與訊息截流秒數)
+# 2. 短期記憶緩衝區配置 (限制回溯回合數與訊息截流秒數)
 MAX_HISTORY_TURNS = 2
 conversation_memory = {} 
 
@@ -78,7 +58,7 @@ BUFFER_SECONDS = 5
 IMAGE_BUFFER_SECONDS = 10 
 message_buffer = {} 
 # ============================
-# 記憶體狀態與未解耦之模型連線結束
+# 記憶體狀態與未解耦之狀態機結束
 # ============================
 
 # ============================
