@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 
 # ============================
-# 動態路徑與環境變數初始化
+# 動態路徑與環境變數初始化開始
 # ============================
 # 1. 載入 .env 檔案中的機密環境變數
 load_dotenv() 
@@ -11,14 +11,19 @@ load_dotenv()
 # 2. 【動態路徑核心】取得目前 config.py 所在的資料夾路徑，定義系統根目錄絕對路徑
 # 這樣寫死就不會因為執行路徑不同而找不到資料庫
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ============================
+# 動態路徑與環境變數初始化結束
+# ============================
 
 # ============================
 # 系統參數與路徑設定
 # ============================
 OLLAMA_API_BASE_URL = os.getenv("OLLAMA_API_BASE_URL", "http://localhost:11434")
-IIS_SEND_URL = os.getenv("IIS_SEND_URL", "")
-IIS_API_USER_ID = os.getenv("IIS_API_USER_ID", "")
-LINE_INTERNAL_GROUP_ID = os.getenv("LINE_INTERNAL_GROUP_ID", "")
+
+# 【拔除 IIS】改為官方 LINE Bot SDK 需要的金鑰 (請於 .env 中設定)
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")  # 這邊之後讓ai提醒我要去line official account更新token去.env
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")  # 這邊之後讓ai提醒我要去line official account更新token去.env
+LINE_INTERNAL_GROUP_ID = os.getenv("LINE_INTERNAL_GROUP_ID", "")  # 這邊之後讓ai提醒我要去line official account更新token去.env
 
 # 資料庫存放路徑 (結合 BASE_DIR 動態生成)
 DB_PATH = os.path.join(BASE_DIR, "xuya_vdb", "chroma_storage")           
@@ -26,11 +31,14 @@ CHAT_DB_PATH = os.path.join(BASE_DIR, "xuya_vdb", "chat_history.db")
 
 EMBEDDING_MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
 TOP_K = 6
+# ============================
+# 系統參數與路徑設定結束
+# ============================
 
 # ============================
-# 業務邏輯規則與防護網設定
+# 業務邏輯規則與防護網設定開始
 # ============================
-HANDOFF_TIMEOUT_SECONDS = 600       
+HANDOFF_TIMEOUT_SECONDS = 30 #600秒=10分鐘後切換回AI       
 TAXID_COLLECTION_TIMEOUT_SECONDS = 30 
 TAX_ID_PATTERN = r"^[0-9]{8}$"
 
@@ -56,3 +64,6 @@ HOLIDAYS = [
     "2026-02-28", "2026-04-03", "2026-04-06", "2026-05-01", "2026-06-19",
     "2026-09-25", "2026-09-28", "2026-10-09", "2026-12-25",
 ]
+# ============================
+# 業務邏輯規則與防護網設定結束
+# ============================

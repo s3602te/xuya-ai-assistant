@@ -5,6 +5,7 @@ import { useState } from 'react'
 import Chatroom from './Chatroom.jsx'        // 載入 AI 對話聊天室元件
 import Architecture from './Architecture.jsx'  // 載入系統架構展示元件
 import Deployment from './Deployment.jsx'    // 載入 CI/CD 部署流程展示元件
+import Admin from './Admin.jsx' // 載入客服後台元件
 // ============================
 // 元件與模組引入結束
 // ============================
@@ -103,6 +104,18 @@ export default function PageController() {
           >
             🎨 Docker CI/CD展示
           </button>
+
+          {/* 【新增】進入客服後台的專屬按鈕 */}
+          <button 
+            onClick={() => handleSwitchPage('admin')} 
+            className={`w-64 py-3.5 rounded-2xl font-bold text-lg shadow-md transition-all ${
+              currentPage === 'admin' 
+                ? 'bg-orange-600 text-white ring-2 ring-orange-400 shadow-orange-500/30' 
+                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            🎧 進入客服後台
+          </button>
         </div>
       )}
       {/* ============================ */}
@@ -118,6 +131,7 @@ export default function PageController() {
         {currentPage === 'chat' && <Chatroom />}
         {currentPage === 'app1' && <Architecture />}
         {currentPage === 'app2' && <Deployment />}
+        {currentPage === 'admin' && <Admin />}
       </div>
       {/* ============================ */}
       {/* 3. 主畫面內容展示區結束         */}

@@ -10,6 +10,7 @@ __pycache__/
 
 # 執行檔與靜態打包 = 沒必要上傳
 ngrok.exe
+cloudflared.exe
 dist/
 
 # 資料庫實體檔案 (只防實體檔，不防 .py 腳本與 csv)

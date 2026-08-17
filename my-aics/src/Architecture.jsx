@@ -1,10 +1,14 @@
 // ============================
 // 元件與靜態資源引入開始
 // ============================
+// 1. 引入 React 核心模組，用於狀態管理與生命週期控制
 import { useState, useEffect, useRef } from 'react'
-import mermaid from 'mermaid'                       // 1. 引入 mermaid 套件，用於渲染動態架構圖
-import archImageV1 from './assets/ivtc-line-architecture.png' // 2. 匯入 V1.0 靜態圖片資源
-import archImageV2 from './assets/my-line-architecture.png' // 3. 【修復】改用 PNG 格式，解決 SVG 透明背景在深色模式下變成全黑的問題
+// 2. 引入 mermaid 套件，用於渲染動態架構圖
+import mermaid from 'mermaid'
+// 3. 匯入 V1.0 靜態圖片資源
+import archImageV1 from './assets/ivtc-line-architecture.png'
+// 4. 匯入 V2.0 靜態圖片資源：改用 PNG 格式，解決 SVG 透明背景在深色模式下變成全黑的問題
+import archImageV2 from './assets/my-line-architecture.png'
 // ============================
 // 元件與靜態資源引入結束
 // ============================
@@ -13,15 +17,22 @@ export default function Architecture() {
   // ============================
   // 狀態管理與 DOM 參考開始
   // ============================
-  const containerRef = useRef(null); // 1. 宣告容器的 DOM 參考，用於後續控制內部滾動條位置
+  // 1. 宣告容器的 DOM 參考，用於後續控制內部滾動條位置
+  const containerRef = useRef(null);
 
-  const [password, setPassword] = useState('')        // 2. 追蹤使用者在輸入框中鍵入的密碼
-  const [isUnlocked, setIsUnlocked] = useState(false) // 3. 紀錄當前頁面是否已成功解鎖
-  const [errorMsg, setErrorMsg] = useState('')        // 4. 紀錄密碼驗證失敗時要顯示的錯誤提示訊息
+  // 2. 追蹤使用者在輸入框中鍵入的密碼
+  const [password, setPassword] = useState('')
+  // 3. 紀錄當前頁面是否已成功解鎖
+  const [isUnlocked, setIsUnlocked] = useState(false)
+  // 4. 紀錄密碼驗證失敗時要顯示的錯誤提示訊息
+  const [errorMsg, setErrorMsg] = useState('')
 
-  const [activeVersion, setActiveVersion] = useState(0)                 // 5. 追蹤目前輪播展示的架構版本 (0 = V1.0, 1 = V2.0)
-  const [lightboxImage, setLightboxImage] = useState(null)              // 6. 儲存要全螢幕放大的靜態圖片來源
-  const [isMermaidFullscreen, setIsMermaidFullscreen] = useState(false) // 7. 控制 Mermaid 終端機是否開啟全螢幕
+  // 5. 追蹤目前輪播展示的架構版本 (0 = V1.0, 1 = V2.0)
+  const [activeVersion, setActiveVersion] = useState(0)
+  // 6. 儲存要全螢幕放大的靜態圖片來源
+  const [lightboxImage, setLightboxImage] = useState(null)
+  // 7. 控制 Mermaid 終端機是否開啟全螢幕
+  const [isMermaidFullscreen, setIsMermaidFullscreen] = useState(false)
   // ============================
   // 狀態管理與 DOM 參考結束
   // ============================
@@ -122,9 +133,10 @@ graph TD
   useEffect(() => {
     // 1. 判斷畫面是否解鎖，確保 DOM 存在才啟動引擎
     if (isUnlocked) {
+      // 2. 初始化 Mermaid 配置：深色主題、允許較寬鬆的安全層級
       mermaid.initialize({
         startOnLoad: true,
-        theme: 'dark', // 2. 設定深色主題
+        theme: 'dark',
         securityLevel: 'loose',
         // 3. 取消強制縮放限制，確保 Mermaid 以 100% 原始解析度清晰繪製
         flowchart: { useMaxWidth: false } 
@@ -134,7 +146,8 @@ graph TD
         mermaid.contentLoaded();
       }, 50);
     }
-  }, [isUnlocked, activeVersion, isMermaidFullscreen]); // 5. 監聽版本與全螢幕狀態，變更時觸發重繪
+  // 5. 監聽版本切換與全螢幕狀態，變更時觸發重繪
+  }, [isUnlocked, activeVersion, isMermaidFullscreen]);
   // ============================
   // Mermaid 初始化與動態重繪邏輯結束
   // ============================
@@ -143,9 +156,8 @@ graph TD
   // ============================
   // 視窗與容器滾動控制開始
   // ============================
-  // 處理行動裝置或切換頁面時的捲軸位置殘留問題
   useEffect(() => {
-    // 1. 強制將全域視窗滾動至最頂部
+    // 1. 處理行動裝置或切換頁面時的捲軸位置殘留問題：強制將全域視窗滾動至最頂部
     window.scrollTo(0, 0);
     
     // 2. 若頁面已解鎖且內部容器成功掛載，將內部容器也重置回頂部
@@ -162,26 +174,26 @@ graph TD
   // 密碼驗證與解鎖邏輯開始
   // ============================
   const handleUnlock = () => {
-    // 定義高強度密碼的正規表達式 (Regex)
+    // 1. 定義高強度密碼的正規表達式 (Regex)
     // 規則條件：
-    // 1. (?=.*[a-z]) : 至少包含一個小寫英文字母
-    // 2. (?=.*[A-Z]) : 至少包含一個大寫英文字母
-    // 3. (?=.*\d)    : 至少包含一個數字
-    // 4. (?=.*[!@#$%^&*]) : 至少包含一個特殊符號
-    // 5. .{8,12}     : 總長度限制為 8 到 12 個字元
+    // - (?=.*[a-z]) : 至少包含一個小寫英文字母
+    // - (?=.*[A-Z]) : 至少包含一個大寫英文字母
+    // - (?=.*\d)    : 至少包含一個數字
+    // - (?=.*[!@#$%^&*]) : 至少包含一個特殊符號
+    // - .{8,12}     : 總長度限制為 8 到 12 個字元
     const regex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*]).{8,12}$/
 
-    // 執行驗證流程
+    // 2. 執行驗證流程
     if (password === 'Abcd0304!') {
-        // 1. 驗證通過指定授權密碼：畫面歸零、設定解鎖狀態、清空錯誤訊息
+        // 2-1. 驗證通過指定授權密碼：畫面歸零、設定解鎖狀態、清空錯誤訊息
         window.scrollTo(0, 0); 
         setIsUnlocked(true)
         setErrorMsg('')
     } else if (!regex.test(password)) {
-        // 2. 驗證格式失敗：提示密碼強度與格式要求
+        // 2-2. 驗證格式失敗：提示密碼強度與格式要求
         setErrorMsg('密碼格式錯誤：需 8-12 位，含大小寫字母、數字與特殊符號。')
     } else {
-        // 3. 格式正確但密碼錯誤：提示向擁有者索取
+        // 2-3. 格式正確但密碼錯誤：提示向擁有者索取
         setErrorMsg('密碼驗證失敗，請向求職者索取正確密碼！')
     }
   }
@@ -195,12 +207,14 @@ graph TD
   // ============================
   if (!isUnlocked) {
     return (
+      // 1. 渲染滿版的登入背景與容器
       <div className="w-full h-[100dvh] flex flex-col items-center justify-center bg-gray-900 p-4">
         <div className="bg-gray-800 p-8 rounded-2xl shadow-2xl max-w-md w-full border border-gray-700 text-center">
           <div className="text-5xl mb-4">🔒</div>
           <h2 className="text-2xl font-bold text-white mb-2">機密架構文件</h2>
           <p className="text-gray-400 text-sm mb-6">此區域僅限面試環節展示，請輸入授權密碼解鎖。</p>
           
+          {/* 2. 密碼輸入框區塊 */}
           <input 
             type="password"
             value={password}
@@ -210,9 +224,10 @@ graph TD
             className="w-full bg-gray-900 text-white border border-gray-600 rounded-lg px-4 py-3 mb-4 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
           />
           
-          {/* 根據 errorMsg 狀態判斷：有錯誤內容時才會渲染出提示文字 */}
+          {/* 3. 錯誤訊息提示區：根據 errorMsg 狀態判斷，有錯誤內容時才會渲染出提示文字 */}
           {errorMsg && <p className="text-red-400 text-sm mb-4 text-left">{errorMsg}</p>}
           
+          {/* 4. 觸發驗證與解鎖按鈕 */}
           <button 
             onClick={handleUnlock}
             className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg hover:bg-blue-700 transition-colors shadow-lg shadow-blue-900/50"
@@ -231,23 +246,26 @@ graph TD
   // ============================
   // 畫面 B：系統架構圖 (解鎖狀態) 渲染開始
   // ============================
-  // 將 containerRef 綁定於最外層容器，確保滾動條重置邏輯生效
   return (
+    // 1. 最外層滿版主視窗容器，將 containerRef 綁定於此確保滾動條重置邏輯生效
     <div ref={containerRef} className="w-full h-[100dvh] p-8 pt-14 md:pt-8 bg-gray-50 overflow-y-auto animate-fade-in transition-all duration-300">
       
       {/* ============================ */}
       {/* 靜態圖片點擊放大全螢幕 (Lightbox) 彈窗區塊開始 */}
       {/* ============================ */}
       {lightboxImage && (
+        // 1. 全螢幕黑色半透明遮罩背景
         <div 
           className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 cursor-zoom-out animate-fade-in"
           onClick={() => setLightboxImage(null)} 
         >
+          {/* 2. 置中的放大圖片 */}
           <img 
             src={lightboxImage} 
             alt="放大架構圖" 
             className="max-w-full max-h-full object-contain shadow-2xl rounded-lg"
           />
+          {/* 3. 右上角關閉圖示 */}
           <div className="absolute top-6 right-6 text-white text-3xl font-bold">✕</div>
         </div>
       )}
@@ -255,17 +273,19 @@ graph TD
       {/* 靜態圖片點擊放大全螢幕 (Lightbox) 彈窗區塊結束 */}
       {/* ============================ */}
 
+      {/* 2. 內容最大寬度與置中容器 */}
       <div className="max-w-4xl mx-auto">
         
         {/* ============================ */}
         {/* 標題與版本切換按鈕區塊開始        */}
         {/* ============================ */}
         <div className="flex flex-col md:flex-row md:items-end justify-between mb-8 pb-4">
+          {/* 1. 頁面主標題 */}
           <h1 className="text-3xl font-extrabold text-gray-900 mb-4 md:mb-0 border-b-4 border-blue-500 pb-2 inline-block">
             系統架構藍圖 (System Architecture)
           </h1>
           
-          {/* 版本切換按鈕群 */}
+          {/* 2. 版本切換按鈕群 */}
           <div className="flex bg-gray-200 p-1 rounded-lg">
             <button 
               onClick={() => setActiveVersion(0)}
@@ -289,6 +309,7 @@ graph TD
         {/* 架構圖展示區 (靜態圖片) 開始     */}
         {/* ============================ */}
         <div className="w-full bg-white rounded-xl mb-8 shadow-lg overflow-hidden border border-gray-200 transition-opacity duration-300">
+          {/* 1. 圖片頂部標題列與放大提示 */}
           <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 text-sm font-bold text-gray-600 flex justify-between items-center">
             <span>{activeVersion === 0 ? "V1.0 LINE 企業客服 (靜態總覽)" : "V2.0 Web 全端 AI 助理 (靜態總覽)"}</span>
             <span 
@@ -298,7 +319,7 @@ graph TD
               🔍 點擊放大
             </span>
           </div>
-          {/* 【確保清晰】使用 object-contain 與淺色背景，配合 PNG 圖片，保證不裁切且完美顯示 */}
+          {/* 2. 靜態圖片渲染區塊：使用 object-contain 與淺色背景，配合 PNG 圖片保證不裁切且完美顯示 */}
           <div className="bg-gray-50 flex justify-center w-full">
             <img 
               src={activeVersion === 0 ? archImageV1 : archImageV2} 
@@ -319,7 +340,7 @@ graph TD
             ? "fixed inset-0 z-[80] bg-black p-4 flex flex-col animate-fade-in" 
             : "w-full bg-black rounded-xl border border-gray-700 shadow-2xl overflow-hidden mb-8 transition-all duration-300"
         }>
-          {/* 終端機頂部控制列 */}
+          {/* 1. 終端機頂部控制列 */}
           <div className="bg-gray-800 px-4 py-2 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="w-3 h-3 rounded-full bg-red-500 cursor-pointer" onClick={() => setIsMermaidFullscreen(false)}></div>
@@ -329,7 +350,7 @@ graph TD
                 {activeVersion === 0 ? "architecture_v1_line.md" : "architecture_v2_web.md"} - Mermaid Live Preview
               </span>
             </div>
-            {/* 全螢幕切換按鈕 */}
+            {/* 2. 全螢幕切換按鈕 */}
             <button 
               onClick={() => setIsMermaidFullscreen(!isMermaidFullscreen)}
               className="text-gray-400 hover:text-white text-lg transition-colors font-bold"
@@ -343,7 +364,7 @@ graph TD
           {/* 使用 overflow-auto 允許自由滾動，並利用 w-fit mx-auto 保證過大的圖表不會被 flex 置中裁斷左半邊 */}
           <div className="flex-1 p-6 overflow-auto bg-gray-900 cursor-move">
             <div className="w-fit mx-auto">
-              {/* 利用 key 強制 React 銷毀並重建 DOM 節點，解決 Mermaid 無法動態重繪的問題 */}
+              {/* 4. 利用 key 強制 React 銷毀並重建 DOM 節點，解決 Mermaid 無法動態重繪的問題 */}
               <pre key={`${activeVersion}-${isMermaidFullscreen}`} className="mermaid text-sm animate-fade-in">
                 {activeVersion === 0 ? mermaidCodeV1 : mermaidCodeV2}
               </pre>
@@ -359,7 +380,7 @@ graph TD
         {/* 核心技術說明網格區塊 (原始 HTML 結構) 開始 */}
         {/* ============================ */}
         
-        {/* 當 activeVersion 為 0 時，渲染 V1.0 的 HTML 區塊 */}
+        {/* 1. 當 activeVersion 為 0 時，渲染 V1.0 的技術說明網格 */}
         {activeVersion === 0 && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-blue-500">
@@ -384,7 +405,7 @@ graph TD
           </div>
         )}
 
-        {/* 當 activeVersion 為 1 時，渲染 V2.0 的 HTML 區塊 */}
+        {/* 2. 當 activeVersion 為 1 時，渲染 V2.0 的技術說明網格 */}
         {activeVersion === 1 && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-blue-500">
@@ -420,7 +441,7 @@ graph TD
       </div>
     </div>
   )
-  // ============================
-  // 畫面 B：系統架構圖 (解鎖狀態) 渲染結束
-  // ============================
 }
+// ============================
+// 畫面 B：系統架構圖 (解鎖狀態) 渲染結束
+// ============================
