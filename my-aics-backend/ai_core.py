@@ -158,23 +158,24 @@ mcp_tools = [
 # ============================
 # Ollama 多模態與 MCP 生成模組開始
 # ============================
-def get_ollama_response(prompt, image_b64=None, model_name="XUYA:latest"):
+# 【SA 結構優化】：原本接收純字串 prompt，現在改為接收已經整理好的 messages_list 陣列
+def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest"):
     try:
-        # ==========================================
-        # 🛡️ 【SA 自適應防火牆】：賦予 AI 判斷何時該用 RAG、何時該上網的通用邏輯
-        # ==========================================
+        # 1. 最高權限防火牆 (System Guardrail) 保持不變，作為陣列的最開頭
         system_guardrail = (
             "你是專業的 AI 面試助理。你的任務是精準回答問題。\n"
             "【嚴格規定】：請優先整理並依靠你收到的【參考知識庫】來回答問題，絕對禁止為了偷懶而上網搜尋已經存在的履歷或專案資訊！"
         )
 
-        messages = [
-            {"role": "system", "content": system_guardrail},
-            {"role": "user", "content": prompt}
-        ]
+        # 2. 將最高指令與 state_manager 整理好的對話清單組合起來
+        messages = [{"role": "system", "content": system_guardrail}] + messages_list
         
+        # 3. 圖片處理：將圖片外掛到陣列中「最後一個使用者 (user)」的對話框裡
         if image_b64:
-            messages[1]["images"] = [image_b64]
+            for msg in reversed(messages):
+                if msg["role"] == "user":
+                    msg["images"] = [image_b64]
+                    break
 
         payload = {
             "model": model_name, 
@@ -246,7 +247,7 @@ def get_ollama_response(prompt, image_b64=None, model_name="XUYA:latest"):
                     else:
                         # 真正遭遇外部知識，才放行呼叫 Brave API
                         print(f"[MCP 執行] 🌐 放行！正在上網搜尋：「{search_query}」...")
-                        tool_result = search_web(search_query)  # 只有這裡會觸發網路！
+                        tool_result = search_web(search_query)  
                     
                     # 將找回來的網頁資料，以 "tool" 角色塞回給大腦看
                     messages.append({

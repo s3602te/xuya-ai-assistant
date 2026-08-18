@@ -188,41 +188,40 @@ def process_actual_logic(conv_key):
         send_websocket_reply(user_id, session_id, "【系統通知】是否轉接真人客服？", options=["是", "否"])
         return
 
-    # 8. 正常 AI 流程：搜尋雙軌知識庫，並依據有無圖片選擇合適的 Prompt 組合交由 Ollama 生成
+    # 8. 正常 AI 流程：動態組裝標準 Multi-Agent 格式的訊息陣列
     relevant = search_knowledge(user_message)
     context_str = "\n".join(relevant) if relevant else "無相關資料。"
     now = datetime.now()
     current_time_str = now.strftime("%Y年%m月%d日 %H點%M分 (星期%w)")
 
+    # 準備用來裝對話結構的清單 (List)
+    messages_list = []
+
+    # (A) 載入短期記憶 (History)：將過去的對話，精準賦予 user 與 assistant 角色
     history = conversation_memory.get(conv_key, [])
-    history_str = ""
     if history:
-        history_str = "【前情提要】\n"
-        for idx, turn in enumerate(history):
-            history_str += f"[回合 {idx+1}]\n用戶問：{turn['user']}\nAI答：{turn['ai']}\n"
-        history_str += "------------------\n"
+        for turn in history:
+            messages_list.append({"role": "user", "content": turn['user']})
+            messages_list.append({"role": "assistant", "content": turn['ai']})
+
+    # (B) 載入動態背景 (Context)：以 system 角色，偷偷把 RAG 知識和時間塞給 AI
+    system_context = (
+        f"【動態系統變數】現在時間：{current_time_str}\n\n"
+        f"【目前檢索到的參考知識庫】：\n{context_str}\n\n"
+        f"請使用「繁體中文」回答。絕對不要在回答中印出【資料分類】或【參考來源】等內部標籤。"
+    )
+    messages_list.append({"role": "system", "content": system_context})
 
     print(f"\n===== 🔍 餵給 AI 的參考資料 (Top-{TOP_K}) =====\n{context_str}\n===========================================\n")
 
+    # (C) 載入當前問題：賦予 user 角色
     if user_image:
-        prompt = (
-            f"【參考知識庫】：\n{context_str}\n\n"
-            f"【用戶問題】：{user_message}\n\n"
-            f"請嚴格按照以下兩段式格式回覆：\n"
-            f"🔍 圖片解析：(說明圖片內容)\n💡 客服回應：(給予建議)"
-        )
-        ollama_resp = get_ollama_response(prompt, user_image, "XUYA:latest")
+        final_user_msg = f"{user_message}\n\n請嚴格按照以下兩段式格式回覆：\n🔍 圖片解析：(說明圖片內容)\n💡 客服回應：(給予建議)"
+        messages_list.append({"role": "user", "content": final_user_msg})
+        ollama_resp = get_ollama_response(messages_list, user_image, "XUYA:latest")
     else:
-        prompt = (
-            f"{history_str}現在時間：{current_time_str}\n\n"
-            f"【系統強制指令】\n"
-            f"1. 請務必使用「繁體中文」進行回答。\n"
-            f"2. 參考知識庫中帶有【資料分類】的標籤進行回答，嚴格依據參考知識庫內容回答，絕對不可自行編造。\n"
-            f"3. 「絕對不要」在你的回答中印出【資料分類】、【參考來源】等內部標籤字眼，請將資訊自然地融入語句中。\n\n"
-            f"【參考知識庫】：\n{context_str}\n\n"
-            f"請回答最新問題：{user_message}"
-        )
-        ollama_resp = get_ollama_response(prompt, None, "XUYA:latest")
+        messages_list.append({"role": "user", "content": user_message})
+        ollama_resp = get_ollama_response(messages_list, None, "XUYA:latest")
     
     # 9. 後處理與防呆：清理 AI 偷漏出來的內部標籤字眼，並寫入短期記憶
     if ollama_resp == "AI_IMAGE_ERROR":
