@@ -4,16 +4,22 @@
 # ============================
 # 1. 引入系統操作、網路請求、深度學習框架等標準套件
 import os
+import json
 import requests
+import re  # 【新增】：引入正則表達式，用於捕捉漏氣的 JSON
 import torch
 from sentence_transformers import SentenceTransformer
 
 # 2. 引入自訂模組，包含全域設定參數與 ChromaDB 雙軌資料庫實體
 from config import *
 from database import collection_manual, collection_auto
+
+# 【MCP 外部工具擴充】：引入網頁搜尋隨身碟 (未來有新工具直接在此 import)
+from tools.web_search import search_web
 # ============================
 # 核心模組與套件引入結束
 # ============================
+
 
 # ============================
 # 裝置硬體偵測與模型初始化開始
@@ -42,6 +48,7 @@ embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=DEVICE)
 # ============================
 # 裝置硬體偵測與模型初始化結束
 # ============================
+
 
 # ============================
 # RAG 知識庫檢索模組開始
@@ -110,40 +117,169 @@ def needs_contact_footer(relevant_knowledge, ai_text: str) -> bool:
 # RAG 知識庫檢索模組結束
 # ============================
 
+
 # ============================
-# Ollama 多模態生成模組開始
+# MCP 工具設定檔 (Tool Schema) 開始
+# ============================
+# 這裡就是 AI 的「工具清單」。未來如果要加新工具，直接在此陣列擴充定義，在這個 JSON 陣列裡面即可。
+mcp_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "網頁搜尋引擎。用於補充【參考知識庫】中完全缺乏的外部最新資訊。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    # 【SA 獨家設計】：利用內心獨白 (Chain of Thought) 逼迫 AI 審視 RAG 知識庫
+                    "thought_process": {
+                        "type": "string",
+                        "description": "在搜尋前，請先仔細閱讀使用者提供的【參考知識庫】。並在這裡用一句話說明：知識庫裡面是否『已經有』足夠的資訊來回答這個問題？"
+                    },
+                    "need_internet_search": {
+                        "type": "boolean",
+                        "description": "如果知識庫已有答案，請務必填寫 false。只有當知識庫完全找不到任何相關資料時，才准許填寫 true。"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "需要上網搜尋的精準關鍵字。若不需搜尋請填寫 'None'。"
+                    }
+                },
+                "required": ["thought_process", "need_internet_search", "query"]
+            }
+        }
+    }
+]
+# ============================
+# MCP 工具設定檔 (Tool Schema) 結束
+# ============================
+
+
+# ============================
+# Ollama 多模態與 MCP 生成模組開始
 # ============================
 def get_ollama_response(prompt, image_b64=None, model_name="XUYA:latest"):
     try:
-        # 1. 建立請求酬載 (Payload)：設定模型名稱、關閉串流模式以獲得完整回答，並限制最大生成長度
+        # ==========================================
+        # 🛡️ 【SA 自適應防火牆】：賦予 AI 判斷何時該用 RAG、何時該上網的通用邏輯
+        # ==========================================
+        system_guardrail = (
+            "你是專業的 AI 面試助理。你的任務是精準回答問題。\n"
+            "【嚴格規定】：請優先整理並依靠你收到的【參考知識庫】來回答問題，絕對禁止為了偷懶而上網搜尋已經存在的履歷或專案資訊！"
+        )
+
+        messages = [
+            {"role": "system", "content": system_guardrail},
+            {"role": "user", "content": prompt}
+        ]
+        
+        if image_b64:
+            messages[1]["images"] = [image_b64]
+
         payload = {
-            "prompt": prompt, 
             "model": model_name, 
+            "messages": messages,
             "stream": False,
+            "tools": mcp_tools,  # 將可用工具清單注入給 AI
             "options": {
                 "num_predict": 1024
             }
         }
         
-        # 2. 多模態 (Multimodal) 處理：若有傳入 Base64 圖片編碼，則將其附加至影像陣列中
-        if image_b64:
-            payload["images"] = [image_b64]
-            
-        # 3. 發送 POST 請求至本地端的 Ollama API，並設定逾時保護為 300 秒
-        r = requests.post(f"{OLLAMA_API_BASE_URL}/api/generate", json=payload, timeout=300)
-        
-        # 4. 檢查 HTTP 狀態碼，若非 200 則拋出例外
+        print(f"[AI 引擎] 🧠 正在思考並評估是否需要使用外部工具...")
+        r = requests.post(f"{OLLAMA_API_BASE_URL}/api/chat", json=payload, timeout=300)
         r.raise_for_status()
-        
-        # 5. 解析 JSON 回應，濾除頭尾空白後回傳純文字結果
-        return r.json().get('response', '').strip()
+        response_message = r.json().get("message", {})
+
+        # ==========================================
+        # 🛡️ 【SA 防漏氣攔截網】：捕捉 Ollama 引擎漏接的 JSON 工具呼叫
+        # ==========================================
+        tool_calls = response_message.get("tool_calls", [])
+        content_str = response_message.get("content", "").strip()
+
+        # 如果 Ollama 沒有成功解析 tool_calls，但文字內容裡出現了我們的 JSON 工具格式
+        if not tool_calls and '"name": "search_web"' in content_str:
+            print("[SA 防護網] ⚠️ 偵測到模型原生 JSON 漏氣，啟動強制解析！")
+            try:
+                # 用正則表達式把 JSON 挖出來
+                match = re.search(r'\{.*"name":\s*"search_web".*\}', content_str, re.DOTALL)
+                if match:
+                    leaked_json = json.loads(match.group(0))
+                    # 手動把它轉回標準的 tool_calls 陣列
+                    tool_calls = [{
+                        "function": {
+                            "name": leaked_json.get("name"),
+                            "arguments": leaked_json.get("parameters", {})
+                        }
+                    }]
+                    # 清空 content，避免髒資料干擾歷史對話
+                    response_message["content"] = ""
+            except Exception as parse_err:
+                print(f"[SA 防護網] JSON 解析失敗: {parse_err}")
+        # ==========================================
+
+        if tool_calls:
+            print(f"[AI 引擎] 🛠️ 嘗試呼叫外部工具...")
+            
+            # 如果是我們手動救援的，也要把 tool_calls 加進 response_message 裡
+            response_message["tool_calls"] = tool_calls
+            messages.append(response_message)
+            
+            for tool_call in tool_calls:
+                func_name = tool_call["function"]["name"]
+                arguments = tool_call["function"]["arguments"]
+                
+                # 判斷 AI 是不是呼叫了我們的上網工具
+                if func_name == "search_web":
+                    # 【擷取 AI 的內心獨白與決策】
+                    thought = arguments.get("thought_process", "未提供理由")
+                    # 容錯處理：有時 AI 會傳字串的 "true"/"false"，統一轉為布林值
+                    need_search_val = arguments.get("need_internet_search", True)
+                    need_search = str(need_search_val).lower() == "true"
+                    search_query = arguments.get("query", "")
+
+                    print(f"\n[AI 思考過程] 💭 {thought}")
+                    
+                    if need_search is False or search_query == "None":
+                        print(f"[MCP 防火牆] 🛑 AI 判定知識庫已有解答，攔截網路請求，成功保護 RAG 與 API 額度！")
+                        tool_result = "【系統防護】：你已判斷不需要上網搜尋。請立刻停止使用工具，直接根據【參考知識庫】的內容給出完美的解答！"
+                    else:
+                        # 真正遭遇外部知識，才放行呼叫 Brave API
+                        print(f"[MCP 執行] 🌐 放行！正在上網搜尋：「{search_query}」...")
+                        tool_result = search_web(search_query)  # 只有這裡會觸發網路！
+                    
+                    # 將找回來的網頁資料，以 "tool" 角色塞回給大腦看
+                    messages.append({
+                        "role": "tool",
+                        "content": tool_result
+                    })
+            
+            # 5. 第二階段請求：讓 AI 參考搜尋回傳的內容，進行最終語言統整
+            print(f"[AI 引擎] 🧠 獲取外部資料完畢，正在統整最終回覆...")
+            payload["messages"] = messages
+            r_final = requests.post(f"{OLLAMA_API_BASE_URL}/api/chat", json=payload, timeout=300)
+            r_final.raise_for_status()
+            return r_final.json().get('message', {}).get('content', '').strip()
+
+        else:
+            print(f"[AI 引擎] 💬 判斷不需使用工具，直接回答。")
+            return content_str
+
+    except requests.exceptions.HTTPError as e:
+        # ==========================================
+        # 【SA 進階除錯區塊】：抓取 HTTP 狀態碼與 Ollama 具體報錯訊息
+        # ==========================================
+        error_details = e.response.text if e.response is not None else str(e)
+        status_code = e.response.status_code if e.response is not None else "未知"
+        print(f"\n[Ollama HTTP 錯誤] 狀態碼: {status_code}")
+        print(f"[Ollama 錯誤細節] {error_details}\n")
+        if image_b64: return "AI_IMAGE_ERROR"
+        return f"【系統提示】AI 通訊錯誤 (HTTP {status_code})。"
 
     except Exception as e:
-        # 6. 例外處理：若通訊異常或模型崩潰，根據是否為圖片處理模式回傳對應錯誤代碼
-        print(f"[Ollama 錯誤] {e}")
-        if image_b64:
-            return "AI_IMAGE_ERROR"
-        return "【系統提示】AI 通訊錯誤。"
+        print(f"\n[Ollama 系統錯誤] {e}\n")
+        if image_b64: return "AI_IMAGE_ERROR"
+        return "【系統提示】AI 通訊發生未知錯誤。"
 # ============================
-# Ollama 多模態生成模組結束
+# Ollama 多模態與 MCP 生成模組結束
 # ============================

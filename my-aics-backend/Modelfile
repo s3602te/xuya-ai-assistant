@@ -1,7 +1,7 @@
 # 設定模型的來源
-FROM gemma3:4b
+FROM llama3.1:8b
 
-# 原本gemma3:4b改成gemma3:12b
+# 原本gemma3:4b改成llama3.1:8b
 
 # 定義模型的系統行為
 SYSTEM """

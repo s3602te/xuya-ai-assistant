@@ -16,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # ============================
 
 # ============================
-# 系統參數與路徑設定
+# 系統參數與路徑設定開始
 # ============================
 OLLAMA_API_BASE_URL = os.getenv("OLLAMA_API_BASE_URL", "http://localhost:11434")
 
@@ -24,6 +24,9 @@ OLLAMA_API_BASE_URL = os.getenv("OLLAMA_API_BASE_URL", "http://localhost:11434")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")  # 這邊之後讓ai提醒我要去line official account更新token去.env
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")  # 這邊之後讓ai提醒我要去line official account更新token去.env
 LINE_INTERNAL_GROUP_ID = os.getenv("LINE_INTERNAL_GROUP_ID", "")  # 這邊之後讓ai提醒我要去line official account更新token去.env
+
+# 外部工具 MCP 金鑰設定 (從 .env 讀取，若無則給空字串)
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 
 # 資料庫存放路徑 (結合 BASE_DIR 動態生成)
 DB_PATH = os.path.join(BASE_DIR, "xuya_vdb", "chroma_storage")           
