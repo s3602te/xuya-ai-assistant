@@ -16,6 +16,8 @@ from database import collection_manual, collection_auto
 
 # 【MCP 外部工具擴充】：引入網頁搜尋隨身碟 (未來有新工具直接在此 import)
 from tools.web_search import search_web
+# 【MCP 外部工具擴充】：引入精準數學計算機
+from tools.calculator import calculate_math
 # ============================
 # 核心模組與套件引入結束
 # ============================
@@ -121,8 +123,11 @@ def needs_contact_footer(relevant_knowledge, ai_text: str) -> bool:
 # ============================
 # MCP 工具設定檔 (Tool Schema) 開始
 # ============================
-# 這裡就是 AI 的「工具清單」。未來如果要加新工具，直接在此陣列擴充定義，在這個 JSON 陣列裡面即可。
+# 這裡就是 AI 的「工具清單」。未來如果要加新工具，直接在此 JSON 陣列擴充定義即可。
 mcp_tools = [
+    # ------------------------------------------------------------------
+    # 【MCP 工具 1】：網頁搜尋引擎 (search_web)
+    # ------------------------------------------------------------------
     {
         "type": "function",
         "function": {
@@ -148,7 +153,38 @@ mcp_tools = [
                 "required": ["thought_process", "need_internet_search", "query"]
             }
         }
+    },
+    # ============================
+    # 網頁搜尋 MCP 工具區塊結束
+    # ============================
+
+    # ============================
+    # 數學計算機 MCP 工具區塊開始
+    # ============================
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_math",
+            "description": "精準數學計算機。當問題涉及任何數值運算、薪資預算、日期天數計算或複雜算式時，『必須』呼叫此工具，絕對禁止自己心算以避免幻覺。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought_process": {
+                        "type": "string",
+                        "description": "說明為什麼需要進行這道數學計算？"
+                    },
+                    "expression": {
+                        "type": "string",
+                        "description": "要執行的純數學算式，例如：'1250000 / (80000 * 1.15)' 或 '2026 - 1995'。禁止包含中文字。"
+                    }
+                },
+                "required": ["thought_process", "expression"]
+            }
+        }
     }
+    # ============================
+    # 數學計算機 MCP 工具區塊結束
+    # ============================
 ]
 # ============================
 # MCP 工具設定檔 (Tool Schema) 結束
@@ -198,12 +234,12 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
         tool_calls = response_message.get("tool_calls", [])
         content_str = response_message.get("content", "").strip()
 
-        # 如果 Ollama 沒有成功解析 tool_calls，但文字內容裡出現了我們的 JSON 工具格式
-        if not tool_calls and '"name": "search_web"' in content_str:
+        # 這裡也加強了防漏氣，同時捕捉 search_web 和 calculate_math
+        if not tool_calls and ('"name": "search_web"' in content_str or '"name": "calculate_math"' in content_str):
             print("[SA 防護網] ⚠️ 偵測到模型原生 JSON 漏氣，啟動強制解析！")
             try:
-                # 用正則表達式把 JSON 挖出來
-                match = re.search(r'\{.*"name":\s*"search_web".*\}', content_str, re.DOTALL)
+                # 尋找任何包含 "name": "工具名稱" 的 JSON 區塊
+                match = re.search(r'\{.*"name":\s*"(search_web|calculate_math)".*\}', content_str, re.DOTALL)
                 if match:
                     leaked_json = json.loads(match.group(0))
                     # 手動把它轉回標準的 tool_calls 陣列
@@ -230,7 +266,9 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
                 func_name = tool_call["function"]["name"]
                 arguments = tool_call["function"]["arguments"]
                 
-                # 判斷 AI 是不是呼叫了我們的上網工具
+                # ============================
+                # 網頁搜尋執行區塊開始
+                # ============================
                 if func_name == "search_web":
                     # 【擷取 AI 的內心獨白與決策】
                     thought = arguments.get("thought_process", "未提供理由")
@@ -249,11 +287,34 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
                         print(f"[MCP 執行] 🌐 放行！正在上網搜尋：「{search_query}」...")
                         tool_result = search_web(search_query)  
                     
-                    # 將找回來的網頁資料，以 "tool" 角色塞回給大腦看
                     messages.append({
                         "role": "tool",
                         "content": tool_result
                     })
+                # ============================
+                # 網頁搜尋執行區塊結束
+                # ============================
+
+                # ============================
+                # 數學計算機執行區塊開始
+                # ============================
+                elif func_name == "calculate_math":
+                    thought = arguments.get("thought_process", "未提供計算理由")
+                    expression = arguments.get("expression", "")
+
+                    print(f"\n[AI 思考過程] 💭 {thought}")
+                    print(f"[MCP 執行] 🧮 啟動計算機，正在計算算式：「{expression}」...")
+                    
+                    tool_result = calculate_math(expression)
+                    print(f"[MCP 結果] ✅ {tool_result}")
+                    
+                    messages.append({
+                        "role": "tool",
+                        "content": tool_result
+                    })
+                # ============================
+                # 數學計算機執行區塊結束
+                # ============================
             
             # 5. 第二階段請求：讓 AI 參考搜尋回傳的內容，進行最終語言統整
             print(f"[AI 引擎] 🧠 獲取外部資料完畢，正在統整最終回覆...")

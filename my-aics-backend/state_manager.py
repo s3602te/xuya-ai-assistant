@@ -93,10 +93,14 @@ def process_actual_logic(conv_key):
     if not user_message and user_image:
         user_message = "請幫我看看這張圖片，並說明內容或解決其中的問題。"
 
+    # 因為新增計算mcp之後再看看要不要開啟
+    ##############################################################################################################
     # 2. 財務防護網：比對是否包含帳務等敏感關鍵字，若有則直接阻擋並建議電話聯絡
-    if any(re.search(p, user_message, re.IGNORECASE) for p in BILLING_PATTERNS):
-        send_websocket_reply(user_id, session_id, "涉及到帳務、金額與匯款確認，為保障您的權益，AI 無法處理此類問題。請您於上班時間撥打總公司電話，將有專人為您服務。")
-        return
+    # if any(re.search(p, user_message, re.IGNORECASE) for p in BILLING_PATTERNS):
+    #     send_websocket_reply(user_id, session_id, "涉及到帳務、金額與匯款確認，為保障您的權益，AI 無法處理此類問題。請您於上班時間撥打總公司電話，將有專人為您服務。")
+    #     return
+    ##############################################################################################################
+
 
     # 3. 客戶主動請求重啟 AI：清除所有轉接與鎖定狀態，寫入通知並廣播前端切換為 AI 模式
     if any(re.search(p, user_message, re.IGNORECASE) for p in AI_RESTART_PATTERNS_FROM_CLIENT) or user_message == "取消轉接重啟AI":
