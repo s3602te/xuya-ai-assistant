@@ -11,7 +11,12 @@ from datetime import datetime
 # 2. 引入自訂模組與設定 (包含全域變數、資料庫連線、AI 核心檢索與生成模組)
 from config import *
 from database import get_db_connection
-from ai_core import search_knowledge, get_ollama_response, needs_contact_footer
+# 【SA 航空母艦升級】：保留 RAG 檢索，但把生成大腦替換為 graph_core 的多智能體地圖
+from ai_core import search_knowledge, needs_contact_footer
+from graph_core import app_graph
+# 我們還要引入 langchain 的 Message 格式來裝進背包
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
 
 # 3. 引入 WebSocket 廣播大聲公，用於前後端即時狀態切換與通訊
 from websocket_manager import broadcast_state_change, socketio
@@ -198,34 +203,50 @@ def process_actual_logic(conv_key):
     now = datetime.now()
     current_time_str = now.strftime("%Y年%m月%d日 %H點%M分 (星期%w)")
 
-    # 準備用來裝對話結構的清單 (List)
-    messages_list = []
+    # ========================================================
+    # 🚀 航空母艦 (LangGraph) 派工作業開始
+    # ========================================================
+    # 準備用來裝進背包的對話物件清單
+    langchain_messages = []
 
-    # (A) 載入短期記憶 (History)：將過去的對話，精準賦予 user 與 assistant 角色
-    history = conversation_memory.get(conv_key, [])
-    if history:
-        for turn in history:
-            messages_list.append({"role": "user", "content": turn['user']})
-            messages_list.append({"role": "assistant", "content": turn['ai']})
-
-    # (B) 載入動態背景 (Context)：以 system 角色，偷偷把 RAG 知識和時間塞給 AI
+    # (A) 載入動態背景 (Context)
     system_context = (
         f"【動態系統變數】現在時間：{current_time_str}\n\n"
         f"【目前檢索到的參考知識庫】：\n{context_str}\n\n"
-        f"請使用「繁體中文」回答。絕對不要在回答中印出【資料分類】或【參考來源】等內部標籤。"
     )
-    messages_list.append({"role": "system", "content": system_context})
-
+    langchain_messages.append(SystemMessage(content=system_context))
     print(f"\n===== 🔍 餵給 AI 的參考資料 (Top-{TOP_K}) =====\n{context_str}\n===========================================\n")
 
-    # (C) 載入當前問題：賦予 user 角色
-    if user_image:
-        final_user_msg = f"{user_message}\n\n請嚴格按照以下兩段式格式回覆：\n🔍 圖片解析：(說明圖片內容)\n💡 客服回應：(給予建議)"
-        messages_list.append({"role": "user", "content": final_user_msg})
-        ollama_resp = get_ollama_response(messages_list, user_image, "XUYA:latest")
-    else:
-        messages_list.append({"role": "user", "content": user_message})
-        ollama_resp = get_ollama_response(messages_list, None, "XUYA:latest")
+    # (B) 載入短期記憶 (History)
+    history = conversation_memory.get(conv_key, [])
+    if history:
+        for turn in history:
+            langchain_messages.append(HumanMessage(content=turn['user']))
+            langchain_messages.append(AIMessage(content=turn['ai']))
+
+    # (C) 載入當前問題 (目前暫不支援圖片傳遞給 LangGraph，純文字處理)
+    langchain_messages.append(HumanMessage(content=user_message))
+
+    # (D) 將整理好的訊息裝入初始背包
+    initial_state = {"messages": langchain_messages}
+    ollama_resp = ""
+
+    print(f"\n[狀態機] 🎒 背包打包完成，送入航空母艦...")
+    
+    try:
+        # (E) 啟動 LangGraph 地圖！
+        for output in app_graph.stream(initial_state, {"recursion_limit": 10}):
+            for key, value in output.items():
+                # 我們只關心最後一個房間 (Final_Answer) 的結果
+                if key == "Final_Answer":
+                    ollama_resp = value['messages'][-1].content
+    except Exception as e:
+        print(f"[系統錯誤] 航空母艦運作異常: {e}")
+        ollama_resp = "抱歉，AI 系統處理您的請求時發生錯誤。"
+    
+    # ========================================================
+    # 🚀 航空母艦 (LangGraph) 派工作業結束
+    # ========================================================
     
     # 9. 後處理與防呆：清理 AI 偷漏出來的內部標籤字眼，並寫入短期記憶
     if ollama_resp == "AI_IMAGE_ERROR":
