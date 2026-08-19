@@ -252,7 +252,7 @@ def process_actual_logic(conv_key):
     if ollama_resp == "AI_IMAGE_ERROR":
         ollama_resp = "【系統通知】抱歉，圖片讀取異常，請重新傳送，或者直接用文字向我描述遇到的問題呢？"
     elif not ollama_resp: 
-        ollama_resp = "抱歉，AI 暫時無法回應。"
+        ollama_resp = "【系統通知】抱歉，AI 暫時無法回應。"
     else:
         # 清除 AI 偷漏出來的標籤，例如: （【資料分類：XXX】） 或 【參考來源：XXX】
         ollama_resp = re.sub(r'[（\(]?【資料分類.*?】[）\)]?', '', ollama_resp)

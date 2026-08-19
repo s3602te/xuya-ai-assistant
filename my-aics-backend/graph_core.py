@@ -24,12 +24,12 @@ class AgentState(TypedDict):
 # 📋 第二區：定義主管的「強制下拉式選單」
 # ==========================================
 class RouteDecision(BaseModel):
-    reasoning: str = Field(description="請詳細說明判斷邏輯：使用者的最新問題是什麼？我們現在缺什麼資訊？")
+    reasoning: str = Field(description="請說明你的判斷邏輯。為什麼選擇這個節點？")
     next_node: Literal["Search_Agent", "Math_Agent", "FINISH"] = Field(
         description=(
-            "1. Search_Agent：僅限查詢『外部即時資訊』(如今天股價、天氣、新聞)。履歷資料已經在知識庫，絕對禁止對履歷使用網路搜尋！\n"
-            "2. Math_Agent：僅限『使用者的問題』明確要求加減乘除時。不要因為知識庫裡有年份或數字就亂算！\n"
-            "3. FINISH：如果知識庫已有答案(如自我介紹、經歷)，或者其他 Agent 已經把答案找回來/算出來了，請立刻選擇 FINISH。"
+            "1. Search_Agent：需要上網查詢未知資訊、最新數據時選擇。\n"
+            "2. Math_Agent：有明確計算需求時選擇。\n"
+            "3. FINISH：資料已備齊，可直接回答時選擇。"
         )
     )
 
@@ -50,12 +50,22 @@ supervisor_llm = llm.with_structured_output(RouteDecision)
 def supervisor_node(state: AgentState):
     messages = state["messages"]
     
-    # 【SA 動態連擊升級 v2】：賦予主管分辨 RAG 與外部資訊的能力
+    # 🛑 【Python 物理絕對防禦】：保護 GPU 免受無限迴圈之苦
+    if len(messages) > 0:
+        last_msg = messages[-1]
+        if getattr(last_msg, "name", "") in ["Math_Agent", "Search_Agent"]:
+            if any(error_kw in last_msg.content for error_kw in ["錯誤", "失敗", "異常", "Error"]):
+                print("\n[系統守衛] 🛑 偵測到專家執行異常！Python 物理煞車已啟動，強制結案！")
+                return {"next_node": "FINISH"}
+
+    # 【SA 強制剝奪認知】：徹底封鎖大模型的自信心，強制它依賴工具
     sys_msg = SystemMessage(content=(
-        "你是冷靜聰明的路由主管。請『只針對使用者最後一句話』進行派工判斷。\n"
-        "【鐵則 1 - 知識庫優先】：張序亞的履歷已經在你最上面的『動態系統變數』裡了！只要是問序亞的經歷、自我介紹，直接選 'FINISH'，絕對不准派給 Search_Agent 或 Math_Agent！\n"
-        "【鐵則 2 - 數學觸發時機】：只有當使用者明確要求『計算、算錢、算時間』時才派給 Math_Agent。如果只是單純的閒聊，即使裡面有數字，也絕對不准算數學！\n"
-        "【鐵則 3 - 動態連擊邏輯】：如果任務需要多步驟（例如：查股價再算股數），第一步『必須』先派給 'Search_Agent'。等下一輪你看到 Search_Agent 把股價找回來後，你才可以派給 'Math_Agent' 去計算。"
+        "你是路由主管。你『絕對沒有』任何常識、歷史知識或數學能力！\n"
+        "請嚴格遵守以下派工順序：\n"
+        "1. 若問題是詢問張序亞的履歷，直接選 'FINISH'。\n"
+        "2. 只要問題詢問『客觀事實、數據、現任人物、資本額』，你【絕對不准】憑記憶回答，【強制】第一步先派給 'Search_Agent' 查詢！\n"
+        "3. 拿到 Search_Agent 回報的數字後，若需計算，【絕對不准】在理由中心算，【強制】派給 'Math_Agent'！\n"
+        "4. 只有背包裡已經有【計算機結果】或【搜尋結果】時，才准選 'FINISH'。"
     ))
     decision = supervisor_llm.invoke([sys_msg] + messages)
     print(f"\n[主管 Supervisor] 決定派工給: {decision.next_node} (理由: {decision.reasoning})")
@@ -90,11 +100,9 @@ def math_node(state: AgentState):
     extractor = llm.with_structured_output(MathExpression)
     # 【SA 極限強化】：教導法師如何過濾網頁雜訊
     sys_msg = SystemMessage(content=(
-        "你是一個極度嚴謹的物理與數學翻譯專家。\n"
-        "【規則 1】：如果搜尋結果中出現多個股價數字，請優先採用『Yahoo股市』或標示為『收盤價/成交價』的最新數字，排除新聞標題預測的數字。\n"
-        "【規則 2】：請仔細比對使用者的問題。如果使用者有 100 萬，算式裡就必須是 1000000。\n"
-        "【規則 3】：注意單位一致性。如果你取得的股價是美金 (USD)，必須換算；優先使用台幣 (TWD) 報價。\n"
-        "【規則 4】：將問題轉換為單純的 Python 數學算式，絕對不能包含任何中文字或特殊符號。"
+        "你是物理與數學翻譯專家。\n"
+        "請仔細閱讀 Search_Agent 找回來的數字（注意單位，1億 = 100000000），並將問題轉換為正確的 Python 數學算式。\n"
+        "絕對不能包含中文字。"
     ))
     math_req = extractor.invoke([sys_msg] + state["messages"])
     
@@ -112,13 +120,14 @@ def final_answer_node(state: AgentState):
     context_str = ""
     for msg in state["messages"]:
         # 抓出發言者的角色或名字
-        role_name = msg.name if msg.name else msg.type
+        role_name = getattr(msg, "name", msg.type)
         context_str += f"[{role_name}]: {msg.content}\n\n"
         
-    # 將整份報告塞進單一個 SystemMessage 中，確保 Llama 3 絕對不會格式錯亂
+    # 【SA 記憶隔離】：強制客服公關只針對「最後一個問題」作答
     sys_msg = SystemMessage(content=(
-        "你是一位專業的 AI 助理。請閱讀以下的【調查過程紀錄】，並針對最後一個使用者的問題，用流暢、專業的繁體中文給出最終回答。\n"
-        "【嚴格規定】：請自然地回答結果，絕對不要說出「根據 Math_Agent」、「從上述對話可見」或透露調查過程的生硬字眼。\n"
+        "你是一位專業的 AI 助理。請閱讀以下的【調查過程紀錄】。\n"
+        "【最高鐵則 1】：請『只針對最後一個問題』給出解答，絕對不准重複或提及之前歷史對話的答案（例如不要把前一題的總統跟這題的高鐵混在一起）！\n"
+        "【最高鐵則 2】：請自然地陳述計算或搜尋結果，絕對不要說出「根據 Math_Agent」等內部字眼。\n"
         "--------------------------\n"
         f"【調查過程紀錄】：\n{context_str}"
     ))
@@ -126,7 +135,7 @@ def final_answer_node(state: AgentState):
     # 乾淨俐落：只丟一個訊息給模型，保證 100% 穩定輸出
     response = llm.invoke([sys_msg])
 
-# ==========================================
+    # ==========================================
     # 🛡️ 【SA 終極防護】：切除 Llama 3 溢出的 "assistant" 標籤
     # ==========================================
     import re
@@ -154,13 +163,32 @@ workflow.add_node("Final_Answer", final_answer_node)
 
 workflow.add_edge(START, "Supervisor")
 
+# 【SA 精準防呆邏輯】：只攔截死迴圈，不干涉正常連擊
+def routing_logic(state: AgentState):
+    next_node = state["next_node"]
+    
+    if len(state["messages"]) > 0:
+        last_msg = state["messages"][-1]
+        
+        # 真正的物理煞車：嚴格禁止主管「連續兩步」派給同一個專家 (防止卡死在同一個房間)
+        # 但允許 Search -> Math -> Search 這種跨房間的連擊！
+        if getattr(last_msg, "name", "") == next_node and next_node != "FINISH":
+            print(f"\n[系統守衛] 🛑 偵測到主管試圖連續重複呼叫 {next_node}！物理煞車啟動，強制結案！")
+            return "Final_Answer"
+            
+    # 如果主管判斷任務完成，就正常走向客服公關
+    if next_node == "FINISH":
+        return "Final_Answer"
+    return next_node
+
+# 【正確】：將判斷條件綁定為 routing_logic，確保 Python 物理煞車生效！
 workflow.add_conditional_edges(
     "Supervisor",
-    lambda state: state["next_node"],
+    routing_logic,  # <--- 注意這裡！替換成我們寫好的函式名稱
     {
         "Search_Agent": "Search_Agent",
         "Math_Agent": "Math_Agent",
-        "FINISH": "Final_Answer"
+        "Final_Answer": "Final_Answer" # <--- 因為 routing_logic 回傳的是 "Final_Answer"
     }
 )
 
