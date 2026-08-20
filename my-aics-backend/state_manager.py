@@ -206,43 +206,73 @@ def process_actual_logic(conv_key):
     # ========================================================
     # 🚀 航空母艦 (LangGraph) 派工作業開始
     # ========================================================
-    # 準備用來裝進背包的對話物件清單
-    langchain_messages = []
+    # 【SA 資料隔離升級】：不再把 history 和當前問題塞進同一包 messages，
+    # 而是拆成兩個獨立艙室送進背包：
+    #   - chat_history：過去乾淨的 Q&A，只給 Supervisor / Final_Answer 做語意連貫判斷
+    #   - messages：這一輪全新的工作記憶，只有「動態背景 + 當前問題」，
+    #               Search_Agent / Math_Agent 只看得到這裡，
+    #               physically 不會被上一題殘留的數字污染
 
-    # (A) 載入動態背景 (Context)
+    # (A) 組裝過去乾淨對話歷史 (只有 User 問題 + 最終回答，不含任何內部工具紀錄)
+    history_messages = []
+    history = conversation_memory.get(conv_key, [])
+    if history:
+        for turn in history:
+            history_messages.append(HumanMessage(content=turn['user']))
+            history_messages.append(AIMessage(content=turn['ai']))
+
+    # (B) 組裝這一輪全新的工作記憶：動態背景 (時間/RAG) + 當前問題
     system_context = (
         f"【動態系統變數】現在時間：{current_time_str}\n\n"
         f"【目前檢索到的參考知識庫】：\n{context_str}\n\n"
     )
-    langchain_messages.append(SystemMessage(content=system_context))
+    current_turn_messages = [
+        SystemMessage(content=system_context),
+        HumanMessage(content=user_message)  # (目前暫不支援圖片傳遞給 LangGraph，純文字處理)
+    ]
     print(f"\n===== 🔍 餵給 AI 的參考資料 (Top-{TOP_K}) =====\n{context_str}\n===========================================\n")
 
-    # (B) 載入短期記憶 (History)
-    history = conversation_memory.get(conv_key, [])
-    if history:
-        for turn in history:
-            langchain_messages.append(HumanMessage(content=turn['user']))
-            langchain_messages.append(AIMessage(content=turn['ai']))
-
-    # (C) 載入當前問題 (目前暫不支援圖片傳遞給 LangGraph，純文字處理)
-    langchain_messages.append(HumanMessage(content=user_message))
-
-    # (D) 將整理好的訊息裝入初始背包
-    initial_state = {"messages": langchain_messages}
+    # (C) 將拆分好的兩個艙室裝入初始背包
+    # 【SA 新增】：明確初始化 search_calls / math_calls 為 0，
+    # 雙重保險，確保這兩個計數器從第一步就有明確的初始值，
+    # 避免跨節點延續時發生任何預設值判讀上的疑慮。
+    #
+    # 【SA v2 新增】：補上任務清單版新增的四個欄位。
+    #   plan             -> 由 Planner 節點在圖的第一步產生，這裡先給空清單
+    #   facts            -> 事實帳本，每一輪都必須是全新的空字典(這是跨輪次資料隔離的關鍵)
+    #   searched_queries -> 本輪已打過 API 的關鍵字，同樣每輪清空
+    #   current_step     -> 主管指定的當前任務 id，-1 表示尚未指定
+    # 雖然 Planner 節點內部也會再初始化一次，但這裡明確給值是雙重保險，
+    # 避免哪天 Planner 拋例外時，下游節點讀到 None 而炸掉。
+    initial_state = {
+        "chat_history": history_messages,
+        "messages": current_turn_messages,
+        "retry_count": 0,
+        "search_calls": 0,
+        "math_calls": 0,
+        "plan": [],
+        "facts": {},
+        "searched_queries": [],
+        "current_step": -1
+    }
     ollama_resp = ""
 
-    print(f"\n[狀態機] 🎒 背包打包完成，送入航空母艦...")
+    print(f"\n[狀態機] 🎒 背包打包完成 (歷史 {len(history_messages)} 則 / 本輪 {len(current_turn_messages)} 則)，送入航空母艦...")
     
     try:
-        # (E) 啟動 LangGraph 地圖！
-        for output in app_graph.stream(initial_state, {"recursion_limit": 10}):
+        # (D) 啟動 LangGraph 地圖！
+        # 【SA 調整】：recursion_limit 從 15 提高到 25 當作第二道防線。
+        # 真正防止失控的關鍵是 search_calls/math_calls 的總次數上限(已修復)，
+        # 這裡只是多留一點緩衝空間，避免正常的多實體查詢(例如查兩家公司)
+        # 因為步數剛好卡在邊界而被誤傷。
+        for output in app_graph.stream(initial_state, {"recursion_limit": 25}): #  限制步數 25 步
             for key, value in output.items():
                 # 我們只關心最後一個房間 (Final_Answer) 的結果
                 if key == "Final_Answer":
                     ollama_resp = value['messages'][-1].content
     except Exception as e:
         print(f"[系統錯誤] 航空母艦運作異常: {e}")
-        ollama_resp = "抱歉，AI 系統處理您的請求時發生錯誤。"
+        ollama_resp = "【系統通知】抱歉，AI 系統處理您的請求時發生錯誤。"
     
     # ========================================================
     # 🚀 航空母艦 (LangGraph) 派工作業結束
@@ -261,6 +291,9 @@ def process_actual_logic(conv_key):
         ollama_resp = re.sub(r'這個回答屬於.*?。?', '', ollama_resp)
         ollama_resp = ollama_resp.strip()
 
+    # 【SA 說明】：conversation_memory 只存「乾淨的」使用者問題 + 最終回答，
+    # 不含任何 Search_Agent / Math_Agent 的內部工作紀錄，
+    # 這是能讓 chat_history 保持乾淨、不會二次污染下一輪 messages 的關鍵。
     if conv_key not in conversation_memory: 
         conversation_memory[conv_key] = []
     conversation_memory[conv_key].append({"user": user_message, "ai": ollama_resp})
