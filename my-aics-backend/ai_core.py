@@ -55,66 +55,124 @@ embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=DEVICE)
 # ============================
 # RAG 知識庫檢索模組開始
 # ============================
-def search_knowledge(query, top_k=TOP_K):
-    # 1. 安全性檢查：若資料庫實體尚未建立，直接回傳空陣列防呆
+def search_knowledge_ex(query, top_k=TOP_K) -> dict:
+    """
+    【SA v2 新增】結構化版本的 RAG 檢索，這是給 state_manager / 多智能體使用的主要入口。
+
+    為什麼要多做這一個？
+    舊版 search_knowledge() 不管是「高精準區命中標準答案」還是「Fallback 撈了 6 篇
+    可能完全不相關的參考文件」，回傳的都是一個長得一模一樣的字串陣列。
+    上游拿到之後根本分不清楚「這是精準答案」還是「這只是勉強撈到的雜訊」。
+
+    這件事在 v2 特別重要，因為規劃官(Planner)需要先判斷：
+      「這題知識庫已經有答案了嗎？有的話就不要浪費一次 Brave API 上網查。」
+    分不清楚就沒辦法做這個判斷。
+
+    回傳格式：
+      {
+        "docs": ["【標準問題】…", …],   # 給模型看的文字陣列
+        "hit_type": "manual" | "auto" | "none",
+        "best_distance": float | None
+      }
+      hit_type 意義：
+        manual -> 命中高精準人工問答庫，內容就是標準答案，可信度最高
+        auto   -> 只是從自動擴展庫撈了 Top-K 參考段落，可能完全不相關
+        none   -> 什麼都沒撈到
+    """
     if collection_manual is None or collection_auto is None:
-        return []
-        
+        return {"docs": [], "hit_type": "none", "best_distance": None}
+
     try:
-        # 2. 語意向量化：將使用者的文字問題轉換為高維度向量陣列
+        # 1. 語意向量化：將使用者的文字問題轉換為高維度向量陣列
         qv = embedding_model.encode([query]).tolist()
-        res = []
-        
-        # 3. Stage 1 (A 軌)：優先向高精準手動資料庫進行嚴格檢索
-        results_manual = collection_manual.query(
-            query_embeddings=qv,
-            n_results=1
-        )
-        
-        # 4. 檢驗 A 軌是否成功命中，並取得最佳距離分數
+
+        # 2. Stage 1 (A 軌)：優先向高精準手動資料庫進行嚴格檢索
+        results_manual = collection_manual.query(query_embeddings=qv, n_results=1)
+
+        best_dist = None
         if results_manual['distances'] and len(results_manual['distances'][0]) > 0:
             best_dist = results_manual['distances'][0][0]
             print(f"[檢索路由] 查找高精準區，最佳距離分數為: {best_dist:.3f}")
-            
-            # 5. 設定 L2 距離門檻 (小於 2.0 代表高度相關)
-            ROUTING_THRESHOLD = 2.0 
-            
-            if best_dist < ROUTING_THRESHOLD:
-                # 6. 命中高精準區：提取標準問題與預設解答，格式化後直接回傳並中斷後續檢索
-                matched_q = results_manual['documents'][0][0]
-                matched_a = results_manual['metadatas'][0][0].get('answer', '無對應解答')                
-                formatted_ans = f"【標準問題】{matched_q}\n【標準解答】{matched_a}"
-                res.append(formatted_ans)
-                
-                print("[檢索路由] 🎯 命中高精準區，直接回傳標準答案。")
-                return res
 
-        # 7. Stage 2 (B 軌)：若 A 軌未命中或分數過大，啟動 Fallback 機制向自動擴展庫檢索 Top-K 參考資料
+            # 3. 門檻判斷 (【SA v2 調整】：門檻值改由 config.py 統一管理)
+            if best_dist < RAG_HIGH_PRECISION_THRESHOLD:
+                matched_q = results_manual['documents'][0][0]
+                matched_a = results_manual['metadatas'][0][0].get('answer', '無對應解答')
+                formatted_ans = f"【標準問題】{matched_q}\n【標準解答】{matched_a}"
+                print("[檢索路由] 🎯 命中高精準區，直接回傳標準答案。")
+                return {"docs": [formatted_ans], "hit_type": "manual", "best_distance": best_dist}
+
+        # 4. Stage 2 (B 軌)：Fallback 向自動擴展庫檢索 Top-K 參考資料
         print("[檢索路由] ⚠️ 高精準區查無結果，啟動 Fallback 翻閱參考說明書...")
-        results_auto = collection_auto.query(
-            query_embeddings=qv,
-            n_results=top_k
-        )
-        
-        # 8. 組合參考文件：將檢索到的文件段落與來源名稱整併後，回傳給 AI 作為生成上下文
+        results_auto = collection_auto.query(query_embeddings=qv, n_results=top_k)
+
+        docs = []
         if results_auto['documents'] and len(results_auto['documents'][0]) > 0:
             for doc, meta in zip(results_auto['documents'][0], results_auto['metadatas'][0]):
                 source = meta.get("source", "未知說明書")
-                res.append(f"【參考來源：{source}】\n{doc}")
-                
-        return res
-    except Exception as e:
-        # 9. 錯誤捕捉：檢索過程發生異常時，印出錯誤並安全回傳空陣列
-        print(f"[搜尋錯誤] {e}")
-        return []
+                docs.append(f"【參考來源：{source}】\n{doc}")
 
-def needs_contact_footer(relevant_knowledge, ai_text: str) -> bool:
-    # 1. 判斷防呆條件：若完全沒有參考知識，預設需要補上真人客服轉接選項
-    if not relevant_knowledge: return True
-    # 2. 定義不確定性的關鍵字清單
-    markers = ["抱歉", "無法提供", "不知道", "不清楚"]
-    # 3. 掃描 AI 的回覆內容，若包含上述關鍵字，則觸發真人轉接機制
-    return any(m in ai_text for m in markers)
+        return {
+            "docs": docs,
+            "hit_type": "auto" if docs else "none",
+            "best_distance": best_dist
+        }
+
+    except Exception as e:
+        print(f"[搜尋錯誤] {e}")
+        return {"docs": [], "hit_type": "none", "best_distance": None}
+
+
+def search_knowledge(query, top_k=TOP_K):
+    """
+    【SA v2 保留】舊介面的相容包裝，回傳純字串陣列。
+    app.py 等舊有呼叫端不用改就能繼續跑。新程式請改用 search_knowledge_ex()。
+    """
+    return search_knowledge_ex(query, top_k)["docs"]
+
+
+def needs_contact_footer(relevant_knowledge, ai_text: str,
+                         rag_hit_type: str = "auto",
+                         tools_all_succeeded: bool = True) -> bool:
+    """
+    判斷是否要在回覆末端附上「是否轉接真人客服」的選項。
+
+    【SA v2 大幅改寫】舊版有兩個會讓客人很困擾的問題：
+
+    問題 1：`if not relevant_knowledge: return True`
+      collection_auto.query(n_results=6) 幾乎一定會撈回 6 筆東西(不管相不相關)，
+      所以這條在正常情況下永遠不會成立 —— 看似有防護，其實是空的。
+      反過來，一旦 ChromaDB 是空的或掛掉，就變成「每一句回覆都問要不要轉真人」。
+      改成看 hit_type：只有真的什麼都沒撈到(none)才算知識庫沒東西。
+
+    問題 2：markers 裡有一個裸的「抱歉」
+      這是最大的誤判來源。任何禮貌性用語都會中：
+        「抱歉讓您久等了，台北 101 的高度是 508 公尺」→ 明明答得好好的，卻跳出轉真人。
+      而 v2 的 Final_Answer 在查詢失敗時本來就會誠實說「抱歉，目前查不到…」，
+      這種情況才是真的該轉真人。所以改成「完整語句片語」比對，而不是單一個「抱歉」兩字。
+
+    【SA v2 新增參數】：
+      rag_hit_type        -> 由 search_knowledge_ex() 提供，區分精準命中/勉強撈到/完全沒有
+      tools_all_succeeded -> 由多智能體的任務清單提供。只要有任何一項查詢/計算失敗，
+                             就代表這次的回答是不完整的，主動提供真人管道才合理。
+    """
+    # 1. 多智能體明確回報有任務失敗 → 這次回答不完整，主動提供真人管道
+    if not tools_all_succeeded:
+        return True
+
+    # 2. 知識庫完全沒撈到任何東西 → 沒有任何依據可以回答
+    if rag_hit_type == "none" and not relevant_knowledge:
+        return True
+
+    # 3. 掃描 AI 回覆中「真正表達無能為力」的完整語句
+    #    注意：這裡刻意不使用單獨的「抱歉」「不清楚」等兩字詞，避免禮貌用語誤觸
+    uncertain_patterns = [
+        r"查詢失敗", r"查不到", r"找不到相關", r"沒有查到", r"無法查詢",
+        r"無法提供", r"無法回答", r"無法確認", r"資料不足", r"資訊不足",
+        r"超出我的處理能力", r"我不知道", r"無法完成計算", r"計算步驟未能完成",
+        r"目前沒有(這|該|相關)",
+    ]
+    return any(re.search(p, ai_text) for p in uncertain_patterns)
 # ============================
 # RAG 知識庫檢索模組結束
 # ============================
@@ -123,7 +181,17 @@ def needs_contact_footer(relevant_knowledge, ai_text: str) -> bool:
 # ============================
 # MCP 工具設定檔 (Tool Schema) 開始
 # ============================
-# 這裡就是 AI 的「工具清單」。未來如果要加新工具，直接在此 JSON 陣列擴充定義即可。
+# 【SA v2 重要說明】：
+# 從下面這一段開始到檔案結尾的 mcp_tools + get_ollama_response()，
+# 是「航空母艦(LangGraph)上線之前」的舊版單體 Tool Calling 流程。
+# 目前 state_manager.py 走的是 graph_core.app_graph，這段其實已經不會被執行到，
+# 只有 app.py 還 import 著 get_ollama_response(但也沒有呼叫)。
+#
+# 保留不刪的理由：
+#   1. 之後如果要做 A/B 對照(單體 vs 多智能體)，這是現成的對照組
+#   2. 萬一多智能體出大問題，可以快速切回來救急
+# 如果你確定不再需要，可以整段刪掉，並把 app.py 的 import 一起拿掉。
+# ============================
 mcp_tools = [
     # ------------------------------------------------------------------
     # 【MCP 工具 1】：網頁搜尋引擎 (search_web)
@@ -192,10 +260,13 @@ mcp_tools = [
 
 
 # ============================
-# Ollama 多模態與 MCP 生成模組開始
+# Ollama 多模態與 MCP 生成模組開始 (舊版單體流程，目前未使用)
 # ============================
 # 【SA 結構優化】：原本接收純字串 prompt，現在改為接收已經整理好的 messages_list 陣列
-def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest"):
+def get_ollama_response(messages_list, image_b64=None, model_name=None):
+    # 【SA v2 調整】：預設模型改為讀 config.MAIN_MODEL_NAME，避免這裡又寫死一次模型名稱
+    if model_name is None:
+        model_name = MAIN_MODEL_NAME
     try:
         # 1. 最高權限防火牆 (System Guardrail) 保持不變，作為陣列的最開頭
         system_guardrail = (
@@ -205,7 +276,7 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
 
         # 2. 將最高指令與 state_manager 整理好的對話清單組合起來
         messages = [{"role": "system", "content": system_guardrail}] + messages_list
-        
+
         # 3. 圖片處理：將圖片外掛到陣列中「最後一個使用者 (user)」的對話框裡
         if image_b64:
             for msg in reversed(messages):
@@ -214,7 +285,7 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
                     break
 
         payload = {
-            "model": model_name, 
+            "model": model_name,
             "messages": messages,
             "stream": False,
             "tools": mcp_tools,  # 將可用工具清單注入給 AI
@@ -222,7 +293,7 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
                 "num_predict": 1024
             }
         }
-        
+
         print(f"[AI 引擎] 🧠 正在思考並評估是否需要使用外部工具...")
         r = requests.post(f"{OLLAMA_API_BASE_URL}/api/chat", json=payload, timeout=300)
         r.raise_for_status()
@@ -234,22 +305,18 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
         tool_calls = response_message.get("tool_calls", [])
         content_str = response_message.get("content", "").strip()
 
-        # 這裡也加強了防漏氣，同時捕捉 search_web 和 calculate_math
         if not tool_calls and ('"name": "search_web"' in content_str or '"name": "calculate_math"' in content_str):
             print("[SA 防護網] ⚠️ 偵測到模型原生 JSON 漏氣，啟動強制解析！")
             try:
-                # 尋找任何包含 "name": "工具名稱" 的 JSON 區塊
                 match = re.search(r'\{.*"name":\s*"(search_web|calculate_math)".*\}', content_str, re.DOTALL)
                 if match:
                     leaked_json = json.loads(match.group(0))
-                    # 手動把它轉回標準的 tool_calls 陣列
                     tool_calls = [{
                         "function": {
                             "name": leaked_json.get("name"),
                             "arguments": leaked_json.get("parameters", {})
                         }
                     }]
-                    # 清空 content，避免髒資料干擾歷史對話
                     response_message["content"] = ""
             except Exception as parse_err:
                 print(f"[SA 防護網] JSON 解析失敗: {parse_err}")
@@ -257,15 +324,13 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
 
         if tool_calls:
             print(f"[AI 引擎] 🛠️ 嘗試呼叫外部工具...")
-            
-            # 如果是我們手動救援的，也要把 tool_calls 加進 response_message 裡
             response_message["tool_calls"] = tool_calls
             messages.append(response_message)
-            
+
             for tool_call in tool_calls:
                 func_name = tool_call["function"]["name"]
                 arguments = tool_call["function"]["arguments"]
-                
+
                 # ============================
                 # 網頁搜尋執行區塊開始
                 # ============================
@@ -285,12 +350,9 @@ def get_ollama_response(messages_list, image_b64=None, model_name="XUYA:latest")
                     else:
                         # 真正遭遇外部知識，才放行呼叫 Brave API
                         print(f"[MCP 執行] 🌐 放行！正在上網搜尋：「{search_query}」...")
-                        tool_result = search_web(search_query)  
-                    
-                    messages.append({
-                        "role": "tool",
-                        "content": tool_result
-                    })
+                        tool_result = search_web(search_query)
+
+                    messages.append({"role": "tool", "content": tool_result})
                 # ============================
                 # 網頁搜尋執行區塊結束
                 # ============================

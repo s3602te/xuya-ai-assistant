@@ -12,7 +12,10 @@ from datetime import datetime
 from config import *
 from database import get_db_connection
 # 【SA 航空母艦升級】：保留 RAG 檢索，但把生成大腦替換為 graph_core 的多智能體地圖
-from ai_core import search_knowledge, needs_contact_footer
+# 【SA v2.1 調整】：改用 search_knowledge_ex()，它會額外回報「這次檢索的可信度」
+# (manual=命中高精準標準答案 / auto=只是勉強撈到參考段落 / none=什麼都沒有)。
+# 規劃官 Planner 需要這個資訊才能判斷「知識庫已經有答案了，不必浪費一次 Brave API」。
+from ai_core import search_knowledge_ex, needs_contact_footer
 from graph_core import app_graph
 # 我們還要引入 langchain 的 Message 格式來裝進背包
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -198,7 +201,10 @@ def process_actual_logic(conv_key):
         return
 
     # 8. 正常 AI 流程：動態組裝標準 Multi-Agent 格式的訊息陣列
-    relevant = search_knowledge(user_message)
+    # 【SA v2.1 調整】：改呼叫結構化版本，同時拿到「檢索內容」與「檢索可信度」
+    rag_result = search_knowledge_ex(user_message)
+    relevant = rag_result["docs"]
+    rag_hit_type = rag_result["hit_type"]
     context_str = "\n".join(relevant) if relevant else "無相關資料。"
     now = datetime.now()
     current_time_str = now.strftime("%Y年%m月%d日 %H點%M分 (星期%w)")
@@ -206,12 +212,18 @@ def process_actual_logic(conv_key):
     # ========================================================
     # 🚀 航空母艦 (LangGraph) 派工作業開始
     # ========================================================
-    # 【SA 資料隔離升級】：不再把 history 和當前問題塞進同一包 messages，
-    # 而是拆成兩個獨立艙室送進背包：
+    # 【SA 資料隔離升級】：把背包拆成互不污染的艙室：
     #   - chat_history：過去乾淨的 Q&A，只給 Supervisor / Final_Answer 做語意連貫判斷
-    #   - messages：這一輪全新的工作記憶，只有「動態背景 + 當前問題」，
-    #               Search_Agent / Math_Agent 只看得到這裡，
-    #               physically 不會被上一題殘留的數字污染
+    #   - messages：這一輪全新的工作記憶，只有「動態時間 + 當前問題」
+    #   - rag_context：【SA v2.1 新增】RAG 檢索結果的獨立艙室
+    #
+    # 【SA v2.1 為什麼要把 RAG 搬出 messages？】
+    # 舊版是把 6 篇 RAG 段落塞進 messages 的 SystemMessage 裡，這會造成兩個問題：
+    #   問題 1：Search_Agent 的關鍵字抽取器會連同那 6 篇說明書一起讀進去。
+    #           客人問「台北101多高」，抽取器卻在一堆履歷文字裡找關鍵字，抽出來的東西當然歪。
+    #   問題 2：規劃官 Planner 反而看不到知識庫(因為它只讀 HumanMessage)，
+    #           結果就算知識庫裡已經有標準答案，它還是排一個上網查詢的步驟，白燒 API。
+    # 搬成獨立艙室之後：Planner 與 Final_Answer 看得到，Search_Agent / Math_Agent 完全看不到。
 
     # (A) 組裝過去乾淨對話歷史 (只有 User 問題 + 最終回答，不含任何內部工具紀錄)
     history_messages = []
@@ -221,29 +233,29 @@ def process_actual_logic(conv_key):
             history_messages.append(HumanMessage(content=turn['user']))
             history_messages.append(AIMessage(content=turn['ai']))
 
-    # (B) 組裝這一輪全新的工作記憶：動態背景 (時間/RAG) + 當前問題
-    system_context = (
-        f"【動態系統變數】現在時間：{current_time_str}\n\n"
-        f"【目前檢索到的參考知識庫】：\n{context_str}\n\n"
-    )
+    # (B) 組裝這一輪全新的工作記憶：只放動態時間 + 當前問題
+    #     (RAG 內容已經改走 rag_context 艙室，這裡刻意不放，保持工作記憶乾淨)
+    system_context = f"【動態系統變數】現在時間：{current_time_str}\n"
     current_turn_messages = [
         SystemMessage(content=system_context),
         HumanMessage(content=user_message)  # (目前暫不支援圖片傳遞給 LangGraph，純文字處理)
     ]
-    print(f"\n===== 🔍 餵給 AI 的參考資料 (Top-{TOP_K}) =====\n{context_str}\n===========================================\n")
+    # print(f"\n===== 🔍 餵給 AI 的參考資料 (Top-{TOP_K} / 可信度={rag_hit_type}) =====\n{context_str}\n===========================================\n")
+    print(f"\n[RAG] 🔍 可信度={rag_hit_type} / 撈到 {len(relevant)} 筆 / {len(context_str)} 字")
 
-    # (C) 將拆分好的兩個艙室裝入初始背包
+    # (C) 將拆分好的各個艙室裝入初始背包
     # 【SA 新增】：明確初始化 search_calls / math_calls 為 0，
-    # 雙重保險，確保這兩個計數器從第一步就有明確的初始值，
-    # 避免跨節點延續時發生任何預設值判讀上的疑慮。
+    # 雙重保險，確保這兩個計數器從第一步就有明確的初始值。
     #
-    # 【SA v2 新增】：補上任務清單版新增的四個欄位。
+    # 【SA v2 新增】：任務清單版新增的欄位。
     #   plan             -> 由 Planner 節點在圖的第一步產生，這裡先給空清單
-    #   facts            -> 事實帳本，每一輪都必須是全新的空字典(這是跨輪次資料隔離的關鍵)
+    #   facts            -> 事實帳本，每一輪都必須是全新的空字典(跨輪次資料隔離的關鍵)
     #   searched_queries -> 本輪已打過 API 的關鍵字，同樣每輪清空
     #   current_step     -> 主管指定的當前任務 id，-1 表示尚未指定
-    # 雖然 Planner 節點內部也會再初始化一次，但這裡明確給值是雙重保險，
-    # 避免哪天 Planner 拋例外時，下游節點讀到 None 而炸掉。
+    #
+    # 【SA v2.1 新增】：
+    #   rag_context / rag_hit_type -> RAG 獨立艙室
+    #   all_steps_done             -> 由 Final_Answer 回填，供下面的真人轉接判斷使用
     initial_state = {
         "chat_history": history_messages,
         "messages": current_turn_messages,
@@ -253,26 +265,36 @@ def process_actual_logic(conv_key):
         "plan": [],
         "facts": {},
         "searched_queries": [],
-        "current_step": -1
+        "current_step": -1,
+        "rag_context": context_str,
+        "rag_hit_type": rag_hit_type,
+        "all_steps_done": True,
+        # 【SA v2.3 新增】：規劃官的三態決策結論，先給 undetermined，
+        # 由 Planner 節點在第一步覆蓋成 has_plan / no_tools_needed / undetermined
+        "plan_decision": "undetermined"
     }
     ollama_resp = ""
+    # 【SA v2.1 新增】：預設為 True，只有多智能體明確回報有任務失敗才會被改成 False
+    all_steps_done = True
 
     print(f"\n[狀態機] 🎒 背包打包完成 (歷史 {len(history_messages)} 則 / 本輪 {len(current_turn_messages)} 則)，送入航空母艦...")
-    
+
     try:
         # (D) 啟動 LangGraph 地圖！
-        # 【SA 調整】：recursion_limit 從 15 提高到 25 當作第二道防線。
-        # 真正防止失控的關鍵是 search_calls/math_calls 的總次數上限(已修復)，
-        # 這裡只是多留一點緩衝空間，避免正常的多實體查詢(例如查兩家公司)
-        # 因為步數剛好卡在邊界而被誤傷。
-        for output in app_graph.stream(initial_state, {"recursion_limit": 25}): #  限制步數 25 步
+        # 【SA v2.1 調整】：recursion_limit 改由 config.GRAPH_RECURSION_LIMIT 統一管理。
+        # 真正防止失控的關鍵是 search_calls/math_calls 的總次數上限，
+        # 這裡只是多留緩衝空間，避免正常的多實體查詢因步數卡在邊界而被誤傷。
+        _limit = globals().get("GRAPH_RECURSION_LIMIT", 30)
+        for output in app_graph.stream(initial_state, {"recursion_limit": _limit}):
             for key, value in output.items():
                 # 我們只關心最後一個房間 (Final_Answer) 的結果
                 if key == "Final_Answer":
                     ollama_resp = value['messages'][-1].content
+                    all_steps_done = value.get("all_steps_done", True)
     except Exception as e:
         print(f"[系統錯誤] 航空母艦運作異常: {e}")
         ollama_resp = "【系統通知】抱歉，AI 系統處理您的請求時發生錯誤。"
+        all_steps_done = False
     
     # ========================================================
     # 🚀 航空母艦 (LangGraph) 派工作業結束
@@ -300,8 +322,17 @@ def process_actual_logic(conv_key):
     if len(conversation_memory[conv_key]) > MAX_HISTORY_TURNS:
         conversation_memory[conv_key].pop(0) 
 
-    # 10. AI 信心評估：若知識庫不足或 AI 含有不確定字眼，主動於句尾補上詢問轉接真人的選項
-    if needs_contact_footer(relevant, ollama_resp):
+    # 10. AI 信心評估：若知識庫不足或多智能體有任務失敗，主動於句尾補上詢問轉接真人的選項
+    # 【SA v2.1 調整】：改用新版三參數介面。
+    # 舊版只丟 (relevant, ai_text)，判斷依據是「回覆裡有沒有出現『抱歉』兩個字」——
+    # 那會把「抱歉讓您久等了，台北 101 高 508 公尺」這種完全成功的回覆也判成需要轉真人。
+    # 新版改看兩件更有意義的事：
+    #   rag_hit_type        -> 知識庫到底是精準命中、勉強撈到、還是什麼都沒有
+    #   all_steps_done      -> 多智能體的任務清單有沒有全部完成
+    # 只要有任務失敗，這次回答就是不完整的，主動提供真人管道才合理。
+    if needs_contact_footer(relevant, ollama_resp,
+                            rag_hit_type=rag_hit_type,
+                            tools_all_succeeded=all_steps_done):
         handoff_pending[conv_key] = True
         handoff_context[conv_key] = {"trigger": user_message, "user_id": user_id}
         handoff_pending_times[conv_key] = {"time": time.time(), "session_id": session_id}

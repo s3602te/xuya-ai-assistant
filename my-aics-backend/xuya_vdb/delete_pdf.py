@@ -8,7 +8,7 @@ import chromadb
 # 1. 動態取得當前腳本的絕對路徑，確保跨環境執行不報錯
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 2. 組合出 ChromaDB 向量資料庫的實體儲存路徑
-DB_PATH = os.path.join(BASE_DIR, "xuya_vdb", "chroma_storage")
+DB_PATH = os.path.join(BASE_DIR, "chroma_storage")   
 # ============================
 # 核心模組與環境設定結束
 # ============================

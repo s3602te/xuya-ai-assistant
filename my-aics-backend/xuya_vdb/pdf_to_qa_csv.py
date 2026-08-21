@@ -21,8 +21,8 @@ import pandas as pd
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 2. 定義待處理 PDF 資料夾 (Inbox) 與最終輸出的 CSV 總表路徑
-PDF_FOLDER = os.path.join(BASE_DIR, "pdf_inbox")
-OUTPUT_CSV_PATH = os.path.join(BASE_DIR, "0731ai問答總表.csv")
+PDF_FOLDER = os.path.join(os.path.dirname(BASE_DIR), "pdf_inbox")
+OUTPUT_CSV_PATH = os.path.join(os.path.dirname(BASE_DIR), "0731ai問答總表.csv")
 
 # 3. 定義 Ollama 本地端 API 節點與使用的核心模型 (設定為客製化模型 XUYA:latest)
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
