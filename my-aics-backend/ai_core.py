@@ -55,72 +55,212 @@ embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=DEVICE)
 # ============================
 # RAG 知識庫檢索模組開始
 # ============================
+# ============================
+# 🏹 RAG 弓箭手 (RAG_Archer) — 智慧檢索器
+# ============================
+# 【SA v2.8 全新】這一段取代舊版的 search_knowledge_ex。
+#
+# 為什麼要換掉舊版？舊版有兩個結構性缺陷，剛好造成了實測看到的兩種錯誤回答：
+#
+#   缺陷 1：manual 軌只取 n_results=1（只看第一名）
+#           「rag 雙軌為什麼這樣做」和「你懂 Transformer 嗎」這兩題語意很接近，
+#           分數只差一點點。誰險勝就整碗端走，補進去的正確素材永遠排第二、看不到。
+#
+#   缺陷 2：auto 軌完全沒有相關性門檻（撈回 6 筆就無條件全塞）
+#           問「rag 雙軌」時，auto 軌把 6 段不相關的履歷 PDF 切塊全丟給模型，
+#           模型就從裡面拼出「結合 Transformer 和矩陣運算的方法」這種融合幻覺。
+#
+# 弓箭手的四支箭：
+#   箭 1｜多取幾名再挑：manual 軌改取 top 5，看前幾名而不是只看第一名。
+#   箭 2｜主題投票：前幾名如果集中在同一個 source 分類，可信度更高；
+#         用主題一致性當作「這批結果到底可不可信」的第二個訊號。
+#   箭 3｜auto 軌加門檻：距離超過門檻的段落直接丟掉，不夠像就不塞給模型，
+#         寧可讓模型誠實說「這部分建議面試時再聊」，也不要餵雜訊逼它幻覺。
+#   箭 4｜回傳決策而非一堆文字：明確告訴上游「這是精準答案 / 這是模糊參考 / 什麼都沒有」，
+#         讓盜賊客服知道該把這批資料當標準答案用，還是只當背景參考。
+#
+# 【方案 A】：弓箭手仍然是「檢索在前」——每題一進來先射一箭，
+#   結果放進背包給規劃官與盜賊客服參考，不佔用規劃官的派工判斷。
+
+# 【SA v2.8】auto 軌的相關性門檻。
+# manual 軌用 RAG_HIGH_PRECISION_THRESHOLD（config，目前 0.50）判斷「精準命中」；
+# auto 軌則用這個較寬鬆的門檻判斷「這段到底沾不沾得上邊」。
+# 兩軌都是 cosine 距離（越小越相似），所以數值可以直接比較。
+# 這個值可以之後也搬進 config，先放這裡方便你調。
+RAG_AUTO_RELEVANCE_THRESHOLD = 0.85   # 距離 > 0.85 的 auto 段落視為不相關，直接丟棄
+RAG_MANUAL_TOP_K = 5                    # manual 軌一次看前 5 名做主題投票
+
+
+def _archer_query(collection, query_vec, n):
+    """對單一 collection 射一箭，回傳 [(距離, 文件, metadata), ...]，由近到遠。"""
+    try:
+        res = collection.query(query_embeddings=query_vec, n_results=n)
+    except Exception as e:
+        print(f"[RAG弓箭手] ⚠️ 檢索某一軌時發生錯誤：{e}")
+        return []
+    out = []
+    dists = (res.get("distances") or [[]])[0]
+    docs = (res.get("documents") or [[]])[0]
+    metas = (res.get("metadatas") or [[]])[0]
+    for d, doc, m in zip(dists, docs, metas):
+        out.append((d, doc, m or {}))
+    return out
+
+
 def search_knowledge_ex(query, top_k=TOP_K) -> dict:
     """
-    【SA v2 新增】結構化版本的 RAG 檢索，這是給 state_manager / 多智能體使用的主要入口。
+    【SA v2.8 RAG 弓箭手】結構化 RAG 檢索，給 state_manager／多智能體使用的主要入口。
 
-    為什麼要多做這一個？
-    舊版 search_knowledge() 不管是「高精準區命中標準答案」還是「Fallback 撈了 6 篇
-    可能完全不相關的參考文件」，回傳的都是一個長得一模一樣的字串陣列。
-    上游拿到之後根本分不清楚「這是精準答案」還是「這只是勉強撈到的雜訊」。
-
-    這件事在 v2 特別重要，因為規劃官(Planner)需要先判斷：
-      「這題知識庫已經有答案了嗎？有的話就不要浪費一次 Brave API 上網查。」
-    分不清楚就沒辦法做這個判斷。
-
-    回傳格式：
+    回傳格式（與舊版相容，另外多帶幾個欄位供除錯）：
       {
-        "docs": ["【標準問題】…", …],   # 給模型看的文字陣列
+        "docs": [...],                         # 給模型看的文字陣列
         "hit_type": "manual" | "auto" | "none",
-        "best_distance": float | None
+        "best_distance": float | None,
+        "topic": str | None,                   # 【新增】命中的主題分類
+        "candidates": [(dist, source, q), ...] # 【新增】前幾名候選，方便 log 檢視
       }
-      hit_type 意義：
-        manual -> 命中高精準人工問答庫，內容就是標準答案，可信度最高
-        auto   -> 只是從自動擴展庫撈了 Top-K 參考段落，可能完全不相關
-        none   -> 什麼都沒撈到
     """
     if collection_manual is None or collection_auto is None:
-        return {"docs": [], "hit_type": "none", "best_distance": None}
+        return {"docs": [], "hit_type": "none", "best_distance": None, "topic": None, "candidates": []}
 
     try:
-        # 1. 語意向量化：將使用者的文字問題轉換為高維度向量陣列
         qv = embedding_model.encode([query]).tolist()
 
-        # 2. Stage 1 (A 軌)：優先向高精準手動資料庫進行嚴格檢索
-        results_manual = collection_manual.query(query_embeddings=qv, n_results=1)
+        # ---- 箭 1：manual 軌一次取前 K 名，不再只看第一名 ----
+        manual_hits = _archer_query(collection_manual, qv, RAG_MANUAL_TOP_K)
 
-        best_dist = None
-        if results_manual['distances'] and len(results_manual['distances'][0]) > 0:
-            best_dist = results_manual['distances'][0][0]
-            print(f"[檢索路由] 查找高精準區，最佳距離分數為: {best_dist:.3f}")
+        candidates = []
+        for d, doc, m in manual_hits:
+            candidates.append((round(d, 3), m.get("source", "?"), m.get("question_raw", doc.split("\n")[-1])[:20]))
 
-            # 3. 門檻判斷 (【SA v2 調整】：門檻值改由 config.py 統一管理)
+        if manual_hits:
+            best_dist, best_doc, best_meta = manual_hits[0]
+            best_topic = best_meta.get("source", "?")
+            print(f"[RAG弓箭手] 🎯 手動精準軌最佳距離 {best_dist:.3f}（主題：{best_topic}）")
+            print(f"[RAG弓箭手] 📋 前 {len(candidates)} 名候選：")
+            for dist, src, q in candidates:
+                print(f"           {dist}  [{src}] {q}")
+
+            # ---- 箭 2：主題投票。前幾名裡跟第一名同主題的數量，是可信度的第二訊號 ----
+            same_topic = [h for h in manual_hits if h[2].get("source") == best_topic]
+            topic_votes = len(same_topic)
+
+            # 命中條件：第一名夠近（低於精準門檻）
             if best_dist < RAG_HIGH_PRECISION_THRESHOLD:
-                matched_q = results_manual['documents'][0][0]
-                matched_a = results_manual['metadatas'][0][0].get('answer', '無對應解答')
-                formatted_ans = f"【標準問題】{matched_q}\n【標準解答】{matched_a}"
-                print("[檢索路由] 🎯 命中高精準區，直接回傳標準答案。")
-                return {"docs": [formatted_ans], "hit_type": "manual", "best_distance": best_dist}
+                # 【SA v3.2 改良】：不再只回傳第一名，而是把「同主題且夠近」的條目一起帶回（最多 3 筆）。
+                #
+                # 實測慘案：面試官問「柬埔寨專案用了什麼工具？為什麼要用？」
+                # 弓箭手命中 0.290、主題正確，但第一名條目是「柬埔寨專案具體幹嘛的？」，
+                # 內容只講專案背景、完全沒提工具。模型手上沒素材，就自己編了一個
+                # 「ArcGIS 地理空間分析」出來 —— 而知識庫裡明明有「銀行家捨入法」
+                # 「設備心跳監控」這些真正的答案，只是排在第二、第三名沒被拿出來。
+                #
+                # 多給幾筆同主題素材，模型就不必無中生有。這比在提示裡多寫一條
+                # 「不准編造」有效得多 —— 缺料才是編造的根因。
+                bundle = []
+                seen_answers = []
+                for d, doc, m in manual_hits[:RAG_MANUAL_TOP_K]:
+                    if m.get("source") != best_topic:
+                        continue
+                    if d > RAG_HIGH_PRECISION_THRESHOLD + 0.15:
+                        continue
+                    q = m.get("question_raw", doc.split("\n")[-1])
+                    a = (m.get("answer") or "").strip()
+                    if not a:
+                        continue
+                    # 【SA v3.3 新增】：內容高度重複的條目只留一筆。
+                    #
+                    # v3.2 開始帶回同主題前 3 筆，本意是給模型足夠素材別亂編，
+                    # 但實測「談談你的 DevOps 與 CI/CD 經驗」翻車了 ——
+                    # 那個主題底下三題的答案幾乎一模一樣（都在講 Docker + GitHub Actions
+                    # + Docker Hub），模型讀到三段複製貼上的文字就卡進複讀迴圈，
+                    # 同一句話連續輸出了幾十遍。
+                    #
+                    # 判斷方式很土但有效：比較前 30 個字，重疊就當成同一段。
+                    head = re.sub(r'\s+', '', a)[:30]
+                    if any(head[:20] in s or s[:20] in head for s in seen_answers):
+                        continue
+                    seen_answers.append(head)
+                    bundle.append(f"【參考問題】{q}\n【參考答案】{a}")
+                    if len(bundle) >= 3:
+                        break
+                if not bundle:
+                    matched_q = best_meta.get("question_raw", best_doc.split("\n")[-1])
+                    matched_a = best_meta.get("answer", "無對應解答")
+                    bundle = [f"【參考問題】{matched_q}\n【參考答案】{matched_a}"]
 
-        # 4. Stage 2 (B 軌)：Fallback 向自動擴展庫檢索 Top-K 參考資料
-        print("[檢索路由] ⚠️ 高精準區查無結果，啟動 Fallback 翻閱參考說明書...")
-        results_auto = collection_auto.query(query_embeddings=qv, n_results=top_k)
+                print(f"[RAG弓箭手] ✅ 命中精準軌（主題 {best_topic}，同主題票數 {topic_votes}/{len(manual_hits)}），帶回 {len(bundle)} 筆同主題素材。")
+                return {
+                    "docs": bundle,
+                    "hit_type": "manual",
+                    "best_distance": best_dist,
+                    "topic": best_topic,
+                    "candidates": candidates,
+                }
 
-        docs = []
-        if results_auto['documents'] and len(results_auto['documents'][0]) > 0:
-            for doc, meta in zip(results_auto['documents'][0], results_auto['metadatas'][0]):
-                source = meta.get("source", "未知說明書")
-                docs.append(f"【參考來源：{source}】\n{doc}")
+            # ---- 邊界救援：第一名沒過門檻，但第一名的「主題自洽」 ----
+            # 【SA v2.9 改良】：舊規則要求「前5名有≥3筆同主題」，太嚴。
+            # 實測「rag雙軌為什麼」這題：第一名 0.534（門檻 0.50，只差 0.034）、
+            # 主題正確是「RAG與向量資料庫」、同主題在前5名出現 2 次 —— 卻因為湊不滿3票被放掉，
+            # 掉到 auto 軌拼出幻覺。
+            #
+            # 新規則：第一名略高於門檻一點點（margin 內）、且第一名的主題【不是孤例】
+            # （在前 5 名重複出現至少 2 次），就採用第一名。
+            # 為什麼這樣安全？因為它要求「第一名主題自洽」——
+            # 像「台積電股價」那種前 5 名主題散亂（基本資料/技術能力/工作經歷各1）的情況，
+            # 同主題數不會 ≥2，所以不會被誤救，不破壞已經調好的分離度。
+            RESCUE_MARGIN = 0.08
+            if best_dist < RAG_HIGH_PRECISION_THRESHOLD + RESCUE_MARGIN and topic_votes >= 2:
+                matched_q = best_meta.get("question_raw", best_doc.split("\n")[-1])
+                matched_a = best_meta.get("answer", "無對應解答")
+                print(f"[RAG弓箭手] 🩹 第一名 {best_dist:.3f} 略高於門檻，但主題「{best_topic}」在前 {len(manual_hits)} 名出現 {topic_votes} 次（主題自洽），採用第一名。")
+                return {
+                    "docs": [f"【參考問題】{matched_q}\n【參考答案】{matched_a}"],
+                    "hit_type": "manual",
+                    "best_distance": best_dist,
+                    "topic": best_topic,
+                    "candidates": candidates,
+                }
 
+        # ---- 箭 3：auto 軌加相關性門檻，不夠像的段落直接丟棄 ----
+        print("[RAG弓箭手] ⚠️ 未命中精準軌，改射自動擴展軌（會套用相關性門檻）...")
+        auto_hits = _archer_query(collection_auto, qv, top_k)
+
+        kept = []
+        for d, doc, m in auto_hits:
+            if d <= RAG_AUTO_RELEVANCE_THRESHOLD:
+                src = m.get("source", "未知說明書")
+                kept.append(f"【參考來源：{src}（相關度距離 {d:.2f}）】\n{doc}")
+            else:
+                # 印出被丟掉的，方便你確認門檻鬆緊
+                print(f"[RAG弓箭手] 🗑️ 丟棄不相關段落（距離 {d:.2f} > {RAG_AUTO_RELEVANCE_THRESHOLD}）")
+
+        if kept:
+            print(f"[RAG弓箭手] 📚 自動軌保留 {len(kept)} 段相關參考（原始 {len(auto_hits)} 段）。")
+            best_auto = auto_hits[0][0] if auto_hits else None
+            return {
+                "docs": kept,
+                "hit_type": "auto",
+                "best_distance": best_auto,
+                "topic": None,
+                "candidates": candidates,
+            }
+
+        # ---- 箭 4：兩軌都沒有夠格的結果 → 誠實回報「沒有」 ----
+        # 這一步很重要：與其硬塞不相關的東西逼模型幻覺，
+        # 不如明確回 none，讓盜賊客服照鐵則 10 說「這部分建議面試時再聊」。
+        print("[RAG弓箭手] 🚫 兩軌都沒有足夠相關的內容，回報 none（讓模型誠實說不知道）。")
         return {
-            "docs": docs,
-            "hit_type": "auto" if docs else "none",
-            "best_distance": best_dist
+            "docs": [],
+            "hit_type": "none",
+            "best_distance": (manual_hits[0][0] if manual_hits else None),
+            "topic": None,
+            "candidates": candidates,
         }
 
     except Exception as e:
-        print(f"[搜尋錯誤] {e}")
-        return {"docs": [], "hit_type": "none", "best_distance": None}
+        print(f"[RAG弓箭手] ❌ 檢索發生未預期錯誤：{e}")
+        return {"docs": [], "hit_type": "none", "best_distance": None, "topic": None, "candidates": []}
 
 
 def search_knowledge(query, top_k=TOP_K):
@@ -137,32 +277,26 @@ def needs_contact_footer(relevant_knowledge, ai_text: str,
     """
     判斷是否要在回覆末端附上「是否轉接真人客服」的選項。
 
-    【SA v2 大幅改寫】舊版有兩個會讓客人很困擾的問題：
+    【SA v3.2 修正】：純數學題成功答完卻跳出「資訊不足，是否轉接真人？」
+    實測情境：「10顆糖果分給6個人」—— 弓箭手正確回報 rag_hit_type="none"
+    （這本來就不是履歷題，知識庫查無內容是【正確】結果），
+    計算也順利完成，結果舊版第二條規則直接把「知識庫沒東西」當成「資訊不足」，
+    害使用者在拿到正確答案之後莫名其妙被問要不要轉真人。
 
-    問題 1：`if not relevant_knowledge: return True`
-      collection_auto.query(n_results=6) 幾乎一定會撈回 6 筆東西(不管相不相關)，
-      所以這條在正常情況下永遠不會成立 —— 看似有防護，其實是空的。
-      反過來，一旦 ChromaDB 是空的或掛掉，就變成「每一句回覆都問要不要轉真人」。
-      改成看 hit_type：只有真的什麼都沒撈到(none)才算知識庫沒東西。
-
-    問題 2：markers 裡有一個裸的「抱歉」
-      這是最大的誤判來源。任何禮貌性用語都會中：
-        「抱歉讓您久等了，台北 101 的高度是 508 公尺」→ 明明答得好好的，卻跳出轉真人。
-      而 v2 的 Final_Answer 在查詢失敗時本來就會誠實說「抱歉，目前查不到…」，
-      這種情況才是真的該轉真人。所以改成「完整語句片語」比對，而不是單一個「抱歉」兩字。
-
-    【SA v2 新增參數】：
-      rag_hit_type        -> 由 search_knowledge_ex() 提供，區分精準命中/勉強撈到/完全沒有
-      tools_all_succeeded -> 由多智能體的任務清單提供。只要有任何一項查詢/計算失敗，
-                             就代表這次的回答是不完整的，主動提供真人管道才合理。
+    正解：知識庫沒東西不等於答不出來 —— 只有在「知識庫沒東西」
+    【而且】「也沒有靠工具查到任何東西」的時候，才算真的資訊不足。
     """
     # 1. 多智能體明確回報有任務失敗 → 這次回答不完整，主動提供真人管道
     if not tools_all_succeeded:
         return True
 
-    # 2. 知識庫完全沒撈到任何東西 → 沒有任何依據可以回答
+    # 2. 知識庫沒撈到，而且回覆本身也沒有實質內容 → 才算資訊不足
+    #    （工具成功答完的數學題／搜尋題不該落在這裡）
     if rag_hit_type == "none" and not relevant_knowledge:
-        return True
+        # 回覆裡有數字或有一定長度，代表工具其實有交出東西，不必轉真人
+        has_substance = bool(re.search(r'\d', ai_text or "")) or len((ai_text or "").strip()) > 40
+        if not has_substance:
+            return True
 
     # 3. 掃描 AI 回覆中「真正表達無能為力」的完整語句
     #    注意：這裡刻意不使用單獨的「抱歉」「不清楚」等兩字詞，避免禮貌用語誤觸
@@ -343,7 +477,7 @@ def get_ollama_response(messages_list, image_b64=None, model_name=None):
                     search_query = arguments.get("query", "")
 
                     print(f"\n[AI 思考過程] 💭 {thought}")
-                    
+
                     if need_search is False or search_query == "None":
                         print(f"[MCP 防火牆] 🛑 AI 判定知識庫已有解答，攔截網路請求，成功保護 RAG 與 API 額度！")
                         tool_result = "【系統防護】：你已判斷不需要上網搜尋。請立刻停止使用工具，直接根據【參考知識庫】的內容給出完美的解答！"
@@ -366,18 +500,15 @@ def get_ollama_response(messages_list, image_b64=None, model_name=None):
 
                     print(f"\n[AI 思考過程] 💭 {thought}")
                     print(f"[MCP 執行] 🧮 啟動計算機，正在計算算式：「{expression}」...")
-                    
+
                     tool_result = calculate_math(expression)
                     print(f"[MCP 結果] ✅ {tool_result}")
-                    
-                    messages.append({
-                        "role": "tool",
-                        "content": tool_result
-                    })
+
+                    messages.append({"role": "tool", "content": tool_result})
                 # ============================
                 # 數學計算機執行區塊結束
                 # ============================
-            
+
             # 5. 第二階段請求：讓 AI 參考搜尋回傳的內容，進行最終語言統整
             print(f"[AI 引擎] 🧠 獲取外部資料完畢，正在統整最終回覆...")
             payload["messages"] = messages

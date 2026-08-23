@@ -33,6 +33,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "xuya_vdb", "chroma_storage")
 CSV_PATH = os.path.join(BASE_DIR, "0731ai問答總表.csv")
 EMBEDDING_MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
+
+# 【SA v2.8 修正】：診斷模式會用到這個門檻，但之前忘了引入，導致 NameError。
+# 從 config 讀取真正生效的值；萬一在沒有 config 的環境下單獨執行，退回預設 0.50。
+try:
+    from config import RAG_HIGH_PRECISION_THRESHOLD
+except Exception:
+    RAG_HIGH_PRECISION_THRESHOLD = 0.50
 MANUAL_COLLECTION = "xuya_qa_manual"
 
 # ==========================================
@@ -90,7 +97,48 @@ SHOULD_MISS = [
 ]
 
 
+
+def diagnose_one(model, col, space, question):
+    """
+    【SA v2.8 新增】單題診斷：印出某個問題在 manual 軌的前 5 名候選。
+    用法：python rag_calibrate.py "你想診斷的問題"
+    專門用來查「為什麼這題撈到不對的條目」——弓箭手的主題投票就是靠這些候選在運作的。
+    """
+    qv = model.encode(question).tolist()
+    res = col.query(query_embeddings=[qv], n_results=5)
+    dists = (res.get("distances") or [[]])[0]
+    metas = (res.get("metadatas") or [[]])[0]
+    print("\n" + "=" * 60)
+    print(f"🔎 單題診斷：{question}")
+    print("=" * 60)
+    print(f"{'距離':>8}  {'主題':<16} 問題")
+    topics = {}
+    for d, m in zip(dists, metas):
+        src = m.get("source", "?")
+        q = m.get("question_raw", "?")
+        topics[src] = topics.get(src, 0) + 1
+        print(f"{d:>8.3f}  {src:<16} {q[:30]}")
+    print("-" * 60)
+    top_topic = max(topics, key=topics.get) if topics else "?"
+    print(f"前 5 名主題分佈：" + "、".join(f"{k}×{v}" for k, v in topics.items()))
+    print(f"最佳距離 {dists[0]:.3f}｜門檻 {RAG_HIGH_PRECISION_THRESHOLD}")
+    if dists[0] < RAG_HIGH_PRECISION_THRESHOLD:
+        print(f"→ 第一名過門檻，弓箭手會直接採用主題「{metas[0].get('source')}」")
+        if metas[0].get('source') != top_topic:
+            print(f"  ⚠️ 但前5名多數是「{top_topic}」，第一名可能是險勝的近似題。")
+            print(f"     若答案不對，建議在 CSV 為「{top_topic}」多寫幾種更貼近這個問法的問句。")
+    else:
+        if topics.get(top_topic, 0) >= 3:
+            print(f"→ 第一名沒過門檻，但前5名有 {topics[top_topic]} 筆同屬「{top_topic}」，弓箭手會啟動主題救援。")
+        else:
+            print(f"→ 第一名沒過門檻、主題也不集中，弓箭手會退到 auto 軌或回報 none。")
+    print("=" * 60 + "\n")
+
+
 def main():
+    import sys as _sys
+    _diag_q = _sys.argv[1] if len(_sys.argv) > 1 and not _sys.argv[1].startswith("-") else None
+
     print("\n" + "=" * 76)
     print("🎯 RAG 高精準區門檻校準工具 v2")
     print("=" * 76 + "\n")
@@ -121,6 +169,11 @@ def main():
         print("       ⚠️ 目前仍是 ChromaDB 預設的 l2。實測顯示 l2 在這個 embedding 模型上")
         print("          無法把「該命中」與「不該命中」分開，建議改用 cosine 重建：")
         print("          python xuya_vdb/ingest_manual.py --rebuild")
+
+    # ---- 【SA v2.8】單題診斷模式：有帶問題參數就只診斷那一題然後結束 ----
+    if _diag_q:
+        diagnose_one(model, col, space, _diag_q)
+        return
 
     # ---- CSV 概況 ----
     if os.path.exists(CSV_PATH):

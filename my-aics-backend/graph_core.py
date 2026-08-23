@@ -453,6 +453,25 @@ def _sanitize_plan(plan: list) -> list:
             print(f"[規劃官聖騎士 Planner] 🧹 過濾掉疑似複述指令的假任務：{target!r}")
             continue
 
+        # 【SA v3.1 新增】規則 1.5：search 任務的目標必須是「可以拿去搜尋的東西」
+        #
+        # 實測翻車現場：使用者問「我有10片披薩要怎麼分給4個人，一人可以吃幾片」，
+        # 規劃官吐出的任務清單竟然是：
+        #     [0] search: 4
+        #     [1] search: 10
+        #     [2] math: 4
+        # 網路戰士就真的拿「4」去 Google，還登錄了「4 ＝ 4 公尺」這種荒謬的事實。
+        #
+        # 原因是舊版只檢查 math 任務有沒有指明運算內容，
+        # 完全沒檢查 search 目標合不合理 ——「4」不是空字串就放行了。
+        # 一個合理的搜尋關鍵字至少要有「查什麼東西」，不可能只是一個裸數字。
+        if step.get("type") == "search":
+            t = target.strip()
+            # 純數字（含小數、逗號）或太短的片段，都不是有意義的搜尋目標
+            if re.fullmatch(r'[\d\s,.，、]+', t) or len(t) < 3:
+                print(f"[規劃官聖騎士 Planner] 🧹 過濾掉無意義的搜尋目標：{t!r}（裸數字或過短，不可能查到東西）")
+                continue
+
         # 規則 2：math 任務如果整句話裡連一個數字、一個運算符號、一個運算動詞都沒有，
         #        代表它根本沒說要算什麼，留著只會逼下游硬編算式
         #
@@ -463,10 +482,16 @@ def _sanitize_plan(plan: list) -> list:
         # 吐出「大約是6.36倍」(而且沒照題目要求四捨五入至整數)。
         # 這裡補上運算符號的判斷，寧可放行也不要再誤殺。
         if step.get("type") == "math":
+            t = target.strip()
+            # 【SA v3.1 新增】：math 目標如果只是一個裸數字，同樣是垃圾
+            # （披薩題的 [2] math: 4 就是這樣混過去的，害算盤法師空轉三次）
+            if re.fullmatch(r'[\d\s,.，、]+', t):
+                print(f"[規劃官聖騎士 Planner] 🧹 過濾掉無意義的計算任務：{t!r}（只是一個裸數字，沒說要算什麼）")
+                continue
             has_digit = bool(re.search(r'\d', target))
             has_symbol = bool(re.search(r'[\+\-\*/×÷%]', target))
             has_verb = bool(re.search(
-                r'(加|減|乘|除|相差|差值|差距|倍|總和|合計|平均|百分比|比例|次方|階乘|排列|組合|扣掉|加起來|總計|換算)',
+                r'(加|減|乘|除|相差|差值|差距|倍|總和|合計|平均|百分比|比例|次方|階乘|排列|組合|扣掉|加起來|總計|換算|分給|平分|每人|一人)',
                 target))
             if not has_digit and not has_symbol and not has_verb:
                 print(f"[規劃官聖騎士 Planner] 🧹 過濾掉沒有指明運算內容的 math 任務：{target!r}")
@@ -499,7 +524,39 @@ _ATTR_WORDS = [
     "資本額", "營業額", "市值", "股價", "高度", "人口", "面積", "長度",
     "重量", "票價", "房價", "溫度", "營收", "深度", "時速",
 ]
-_MATH_HINT = r'(計算|算出|相差|差多少|高多少|多多少|少多少|誰比誰|總共|合計|幾倍|百分比|平均|加起來|總和)'
+# 【SA v3.2 設計轉向】：純數學題的判斷改用「反向規則」
+#
+# 舊作法是白名單：列舉「加、減、乘、除、相差、平分、幾片…」。
+# 這條路走不通 —— 中文的數學講法是無窮的，使用者每問一題新的量詞
+# （披薩「片」、糖果「顆」、魚「條」）就要補一次清單，永遠追不完，
+# 而且漏掉的那次就會像實測一樣，拿「大魚總數」去 Google 搜到「一午二紅沙」。
+#
+# 反過來問就簡單多了：「這題需不需要外部事實？」
+# 需要外部事實的訊號種類是【有限且穩定】的 —— 上網、查詢、最新、現任、
+# 今天、股價、匯率、天氣、誰是…… 這份清單不會膨脹。
+#
+# 於是規則變成：
+#     題目裡有數字  +  沒有任何外部事實訊號  →  自足的數學題，直接交給計算機
+#
+# 實測驗證：披薩、糖果、大魚三題全部正確判定為純數學；
+# 而「台北101 和晴空塔差多少」因為沒有數字、且要查高度，不會被誤判。
+_NEEDS_EXTERNAL_FACT = (
+    # 【SA v3.3 修正】：這份清單原本含有裸的「今天／昨天／明天」，結果誤傷慘重 ——
+    # 「如果蘋果60顆、檸檬40顆【今天】要分給9個人」這種純分配題，
+    # 只因為句子裡有「今天」兩個字就被判定成需要上網，前置判定直接放棄，
+    # 題目落回 LLM 手上，算式失控成一長串 comb(10,2)*comb(5,1)/... 整題報廢。
+    #
+    # 時間詞本身不代表需要查外部資料，它只有在「綁著一個會變動的事實」時才算。
+    # 所以改成：時間詞必須與天氣／股價／匯率這類動態資料同時出現才成立。
+    r'(上網|網路搜尋|搜尋一下|查詢|查一下|幫我查|估狗|google|'
+    r'最新|現任|目前的|現在的|即時|'
+    r'股價|股票|匯率|利率|油價|房價|天氣|氣溫|下雨|颱風|新聞|'
+    r'誰是|是誰|哪一年|哪一天|市值|營收|人口|面積|高度|海拔|排名|冠軍|'
+    r'總統|首相|執行長|CEO|董事長)'
+)
+
+# 保留給第三層啟發式拆解使用（雙實體比較題），與純數學判斷無關
+_MATH_HINT = r'(計算|算出|相差|差多少|高多少|多多少|少多少|誰比誰|總共|合計|幾倍|百分比|平均|加起來|總和|平分|分給|每人|一人可以|一個人可以)'
 
 
 def _strip_lead(s: str) -> str:
@@ -543,28 +600,37 @@ def _heuristic_plan(question: str) -> list:
     return _build_plan(items)
 
 
-def _heuristic_math_only(question: str) -> list:
+def _is_self_contained_math(question: str) -> bool:
     """
-    【SA v2.3 新增】純數學題的保底拆解器。
+    【SA v3.2】判斷這題是不是「自足的數學題」——所有需要的數字都寫在題目裡，
+    不需要上網查任何東西。
 
-    實測情境：「從10個人中選3個有幾種組合?」
-    這題完全不需要上網，規劃官照理應該排一個 math 步驟(規則 4)，
-    但 XUYA 回了空清單，害得整題只能靠 Supervisor 的 LLM 保底路徑救回來。
-    能救回來是運氣好，不該當成常態。
+    判準只有兩條，刻意保持極簡：
+      1. 題目裡至少有兩個數字（一個數字通常是「你幾歲」這類事實題，不是運算）
+      2. 題目裡沒有任何「需要外部事實」的訊號
 
-    這裡用純 Python 補上：問題裡同時出現「數字」和「運算意圖」，
-    而且沒有任何需要外部查證的跡象時，就直接排一個 math 步驟，
-    任務描述直接用問題原文(Math_Agent 本來就吃得下原文，
-    而且原文裡的數字正好能通過溯源檢查)。
+    為什麼不看有沒有數學動詞？因為那是無窮清單，追不完（見上方說明）。
     """
     if not question:
-        return []
-    if not re.search(r'\d', question):
-        return []
-    if not re.search(_MATH_HINT + r'|(幾種|幾個|幾倍|多少|排列|組合|階乘|次方)', question):
-        return []
-    # 出現這些字眼代表需要外部事實，就不是純數學題，交給其他層處理
-    if re.search(r'(上網|查詢|查一下|最新|現任|目前|今天|股價|匯率|天氣)', question):
+        return False
+    nums = re.findall(r'\d+(?:\.\d+)?', question)
+    if len(nums) < 2:
+        return False
+    if re.search(_NEEDS_EXTERNAL_FACT, question):
+        return False
+    return True
+
+
+def _heuristic_math_only(question: str) -> list:
+    """
+    【SA v3.2 改寫】自足數學題的保底拆解器。
+
+    只要 _is_self_contained_math 成立，就直接排一個 math 步驟，
+    任務描述【用問題原文】——因為原文裡本來就有全部數字，
+    交給算盤法師時既能通過數字溯源檢查，也保留了完整語境
+    （「分給幾個人、還剩幾個」這種資訊，改寫成算式反而會遺失）。
+    """
+    if not _is_self_contained_math(question):
         return []
     return _build_plan([("math", question.strip())])
 
@@ -607,6 +673,22 @@ def planner_node(state: AgentState):
     if rag_hit_type == "manual":
         print("\n[規劃官聖騎士 Planner] 🎯 RAG 高精準區已命中標準答案，本輪不需要上網查詢，直接結案。")
         return {**base_return, "plan": [], "plan_decision": "no_tools_needed"}
+
+    # ---- 【SA v3.2 新增】前置攔截：自足的數學題根本不必問模型 ----
+    #
+    # 這一步刻意放在【呼叫 LLM 之前】，理由就是你說的：程式碼凌駕於 LLM 判斷。
+    # 只要題目裡的數字已經夠算、又沒有任何需要上網的訊號，
+    # 那「要不要搜尋」這件事根本沒有討論空間，不需要讓模型有機會答錯。
+    #
+    # 實測慘案（全部發生在讓模型自己判斷的時候）：
+    #   「10片披薩分4個人」  → 規劃官吐出 search:4 / search:10，網路戰士真的去 Google「4」
+    #   「大魚70條小魚30條」 → 拆出 search:大魚總數，搜到「一午二紅沙」這句台灣俗諺
+    # 這些題目的數字全部寫在題幹裡，一次 API 都不該打。
+    if _is_self_contained_math(question):
+        math_plan = _build_plan([("math", question.strip())])
+        print("\n[規劃官聖騎士 Planner] 🧮 前置判定：題目自帶所有數字、且無需外部資料 → 純數學題，直接交給算盤法師（零 API、零模型判斷）")
+        print(_render_plan(math_plan))
+        return {**base_return, "plan": math_plan, "plan_decision": "has_plan"}
 
     # ---- 保底鏈第一層：巢狀結構化輸出 ----
     # 【SA v2.2】：layer1_ok / layer2_ok 記錄的是「這一層有沒有成功回傳」，
@@ -736,7 +818,13 @@ def planner_node(state: AgentState):
         print(_render_plan(plan))
     elif layer1_ok or layer2_ok:
         # 有任何一層「成功回傳」但結果是空的 → 這是一個明確的判斷：本題不需要工具。
-        # 先用純 Python 再確認一次是不是純數學題(規劃官偶爾會漏掉這種)。
+        #
+        # 【SA v3.1 注意】：這裡的「空」有兩種來源，兩種都該走同樣的補救：
+        #   (1) 模型本來就回傳空清單（判斷不需要工具）
+        #   (2) 模型回了清單，但整份被 _sanitize_plan 判定為垃圾而清空
+        #       —— 披薩題就是這種：拆出 search:4 / search:10 / math:4，全部被過濾掉。
+        # 兩種情況都先用純 Python 確認一次是不是純數學題，是的話自己補上計算步驟，
+        # 而不是放它去走 LLM 自由判斷（那才是真的會亂搜尋）。
         math_plan = _heuristic_math_only(question)
         if math_plan:
             plan = math_plan
@@ -1049,6 +1137,54 @@ def math_node(state: AgentState):
     print(f"[算盤法師 Math_Agent] 收到任務(本輪第 {math_calls} 次計算)，正在推導公式...")
     print(f"[算盤法師 Math_Agent] 📒 目前可用的事實帳本：\n{_render_facts(facts)}")
 
+    # 【SA v3.2 新增】：任務描述如果【本身就是一條純運算式】，直接拿去算，不要問模型。
+    #
+    # 實測慘案：任務是「10 / 6」——這已經是一條可以直接執行的算式了，
+    # 但舊版還是丟給 gemma3:4b「翻譯」，結果它吐出 comb(6, 1) / comb(10, 1)，
+    # 算出 0.6；下一個任務「10 % 6」它又吐成 10 / 6，算出 1.667。
+    # 兩個答案都是錯的，卻都通過了語法與溯源檢查（因為數字確實來自題目）。
+    #
+    # 這是典型的「讓模型做它不必做的事」。算式已經在手上，翻譯步驟只會引入錯誤。
+    expr_direct = task_desc.strip()
+    if re.fullmatch(r'[\d\.\+\-\*/%\(\)\s]+', expr_direct) and re.search(r'[\+\-\*/%]', expr_direct):
+        print(f"[算盤法師 Math_Agent] ⚡ 任務本身就是純算式，跳過模型翻譯，直接計算：{expr_direct}")
+        from tools.calculator import calculate_math
+        result = calculate_math(expr_direct)
+        if not result.startswith("計算失敗"):
+            if step is not None:
+                step["status"] = "done"
+                step["result"] = result
+                facts[step["target"]] = _extract_calc_value(result)
+            else:
+                facts[f"計算：{expr_direct}"] = _extract_calc_value(result)
+            print(f"[算盤法師 Math_Agent] 📒 已登錄：{task_desc} ＝ {_extract_calc_value(result)}")
+            return {
+                "messages": [AIMessage(name="Math_Agent", content=f"{STATUS_OK}\n【計算機結果】\n{result}")],
+                "plan": plan, "facts": facts,
+                "retry_count": retry_count, "math_calls": math_calls
+            }
+        # 直接算失敗就往下走，讓模型試著重新翻譯
+        print(f"[算盤法師 Math_Agent] ⚠️ 直接計算失敗（{result}），改請模型重新翻譯。")
+
+    # 【SA v3.5 新增】：重試時把上一次失敗的原因帶進提示。
+    #
+    # 舊版重試是「原封不動再問一次」—— 模型沒有任何新資訊，
+    # 實測結果就是連續三次吐出一模一樣的錯誤算式，白白燒掉三次呼叫。
+    # 既然檢查器已經明確知道錯在哪（漏了哪個數字、用錯什麼函式），
+    # 就把它告訴模型，讓重試真的有機會改對。
+    retry_hint = ""
+    if msgs:
+        last = msgs[-1]
+        if getattr(last, "name", "") == "Math_Agent":
+            last_content = str(getattr(last, "content", ""))
+            if last_content.lstrip().startswith(STATUS_FAIL):
+                problem = last_content.split("無法產生有效算式：")[-1].strip()
+                if problem:
+                    retry_hint = (
+                        f"\n\n⚠️【上一次你答錯了，原因如下，請務必修正】：\n{problem[:200]}\n"
+                        "請針對這個問題重新產生算式，不要再交出同樣的答案。"
+                    )
+
     extractor = verify_llm.with_structured_output(MathExpression)
     sys_msg = SystemMessage(content=(
         "你是數學算式翻譯機。請把下方的計算任務，翻譯成一行純 Python 數學算式。\n\n"
@@ -1058,8 +1194,40 @@ def math_node(state: AgentState):
         "1. 只能輸出算式本身，例如 '634 - 508'，【絕對不能包含任何中文字、等號、單位或說明】。\n"
         "2. 算式裡【必須】至少有一個運算子(+ - * /)或函式，"
         "【禁止】只回一個光禿禿的數字(例如只回 '508' 是錯的)。\n"
-        "3. 算式裡的每一個數字，都必須是上面事實帳本裡出現過的數字。\n"
-        "4. 排列組合請用 comb(n, k) / perm(n, k) / factorial(n)，不要用 C(n,k) 這種課本記號。"
+        "3. 算式裡的每一個數字，都必須是上面事實帳本或任務描述裡出現過的數字。\n"
+        # 【SA v3.3 新增】：教它分配題怎麼寫。
+        # 實測「糖果25顆分給7個人，每人幾顆又剩多少」被翻成 comb(25,7)-(7*7)=480651，
+        # 因為模型根本不知道「整除」和「取餘數」該用什麼符號，只好亂抓函式。
+        "4. 【分配題】如果任務是「N 個東西分給 M 個人，每人幾個」，"
+        "請用整數除法 N // M；如果問「還剩幾個」，請用取餘數 N % M。"
+        "例如「25顆分給7個人每人幾顆」→ 25 // 7；「還剩幾顆」→ 25 % 7。\n"
+        # 【SA v3.3 新增】：封鎖 comb 濫用。
+        # 這是所有計算錯誤的共同元凶 —— 小模型學到了「數學任務就用 comb」，於是：
+        #   糖果分配 → comb(25, 7) - (7 * 7)
+        #   10 / 6   → comb(6, 1) / comb(10, 1)
+        #   蘋果檸檬 → comb(10,2)*comb(5,1)/comb(3,1) - comb(7,1) - ...（長到爆行）
+        # 全部通過語法與溯源檢查，因為數字確實來自題目。
+        "5. 【嚴禁濫用組合函式】：comb / perm / factorial 只能用在"
+        "題目明確詢問「組合」「排列」「有幾種選法」「挑選方式」的時候。"
+        "分配、平分、相差、加總、倍數這些題目【一律不准】使用 comb，"
+        "請老實用 + - * / // % 就好。\n"
+        # 【SA v3.4 新增】：允許一次回多條算式。
+        #
+        # 實測情境：「有60顆蘋果、40顆檸檬，要分給9個人，每個人可以各拿多少？又會剩下多少？」
+        # 這一題其實問了四件事（蘋果每人幾顆／蘋果剩幾顆／檸檬每人幾顆／檸檬剩幾顆），
+        # 但舊版只准回一條算式，模型只好硬把它們湊成 (60//9)+(40//9) 這種
+        # 語法正確、語意卻毫無意義的東西。
+        #
+        # 解法很單純：准它用分號隔開多條算式，每一條都會被獨立計算並個別回報。
+        "6. 【題目問了好幾件事時】請用分號 ; 隔開多條算式，每條算式對應一個問題。"
+        "例如「60顆蘋果分給9個人，每人幾顆又剩幾顆」→ 60 // 9 ; 60 % 9。"
+        "如果題目同時問了兩種東西（蘋果和檸檬），就四條都寫出來："
+        "60 // 9 ; 60 % 9 ; 40 // 9 ; 40 % 9。\n"
+        "7. 除了分號之外，【不要】輸出任何其他符號或文字，"
+        "特別是不要在算式前面加冒號、等號或「答案」兩個字。\n"
+        "8. 【題目給的每個數字都要用到】：如果題目寫了 60、40、9 三個數字，"
+        "你的算式就必須把這三個數字都處理到，不可以只算其中一部分。"
+        + retry_hint
     ))
 
     # 【SA v2 隔離重點】：刻意「不」傳入 msgs，只給乾淨的帳本與任務描述
@@ -1067,12 +1235,70 @@ def math_node(state: AgentState):
 
     expr = (math_req.expression or "").strip()
 
+    # 【SA v3.6 修正】：清理算式前後的雜訊字元。
+    #
+    # 這裡我犯了跟「數學動詞白名單」一模一樣的錯誤兩次：
+    #   v3.4：發現模型吐出 ':(60 // 9) + (40 // 9)'，於是我列舉了 : ： = ＝ 「」 引號 …
+    #   v3.6：模型改吐 '60 // 9 ; 60 % 9 ; 40 // 9 ; 40 % 9}' —— 尾巴一個 }
+    #         不在我的清單裡，同一條算式又被整條丟掉，重試三次三次都一樣。
+    #
+    # 教訓：不要列舉「有哪些垃圾」（無窮無盡），要定義「什麼是合法的」（很少而且固定）。
+    # 一條算式的開頭只可能是數字、左括號，或函式名的第一個字母；
+    # 結尾只可能是數字或右括號。其餘一律從邊緣剝掉。
+    def _trim_to_math(e: str) -> str:
+        # 【SA v3.6】開頭只認：數字、左括號、或 ASCII 字母（comb/perm/factorial 的開頭）。
+        # 特別注意要用 isascii()：中文字的 isalpha() 也是 True，
+        # 少了這道檢查，「答案：634 - 508」的「答」會被當成函式名開頭而留下來。
+        e = e.strip()
+        while e and not (e[0].isdigit() or e[0] == "(" or (e[0].isascii() and e[0].isalpha())):
+            e = e[1:].lstrip()
+        while e and not (e[-1].isdigit() or e[-1] == ")"):
+            e = e[:-1].rstrip()
+        return e
+
+    expr = _trim_to_math(expr)
+
+    # 【SA v3.4】：拆成多條算式分別驗證與計算（沒有分號時就是單條，行為不變）
+    # 【SA v3.6】：每一條子算式也各自做邊界清理，
+    # 因為雜訊可能黏在中間某一條的頭尾（例如 "60 // 9 ; ' 40 // 9"）。
+    sub_exprs = [_trim_to_math(e) for e in expr.split(";")]
+    sub_exprs = [e for e in sub_exprs if e]
+    if not sub_exprs:
+        sub_exprs = [expr]
+
     # ---- 檢查 1：語法合法性(允許 comb/perm/factorial) ----
-    stripped_for_check = re.sub(r'\b(comb|perm|factorial)\b', '', expr)
-    syntax_ok = bool(expr) and bool(re.fullmatch(r'[\d\.\+\-\*/\(\),\s]+', stripped_for_check))
+    # 【SA v3.4 修正】：白名單補上 % 與 //。
+    # 上一版才剛在提示裡教模型「求餘數請用 N % M」，
+    # 但這裡的白名單 [\d\.\+\-\*/\(\),\s] 根本沒有 % ——
+    # 等於一邊叫它用，一邊把用了的擋掉。
+    def _syntax_of(e):
+        s = re.sub(r'\b(comb|perm|factorial)\b', '', e)
+        return bool(e) and bool(re.fullmatch(r'[\d\.\+\-\*/%\(\),\s]+', s))
+
+    syntax_ok = all(_syntax_of(e) for e in sub_exprs)
 
     # ---- 檢查 2：語意有效性 —— 必須真的在「算」東西 ----
-    has_operation = bool(re.search(r'[\+\-\*/]', expr)) or bool(re.search(r'\b(comb|perm|factorial)\s*\(', expr))
+    has_operation = all(
+        bool(re.search(r'[\+\-\*/%]', e)) or bool(re.search(r'\b(comb|perm|factorial)\s*\(', e))
+        for e in sub_exprs
+    )
+
+    # ---- 【SA v3.3 新增】檢查 2.5：封鎖組合函式濫用 ----
+    #
+    # 光在提示裡寫「不准濫用 comb」是不夠的 —— 小模型不會照做。
+    # 這裡用程式碼硬擋：只有題目真的在問組合／排列，才准用 comb / perm / factorial。
+    #
+    # 為什麼這條這麼重要？因為 comb 濫用是【所有計算錯誤的共同元凶】：
+    #   「糖果25顆分給7個人」  → comb(25, 7) - (7 * 7)      = 480651
+    #   「10 / 6」            → comb(6, 1) / comb(10, 1)    = 0.6
+    #   「大魚70條分7人」      → comb(140, 1) / comb(1, 1)   = 140
+    #   「蘋果60檸檬40分9人」  → comb(10,2)*comb(5,1)/... 長到把 log 洗爆
+    # 這些算式全部通過了語法檢查與數字溯源（數字確實來自題目），
+    # 所以前面兩道檢查完全攔不住，只能在這裡單獨處理。
+    uses_combinatorics = bool(re.search(r'\b(comb|perm|factorial)\s*\(', expr))
+    question_wants_combinatorics = bool(re.search(
+        r'(組合|排列|幾種|選法|挑選|抽出|抽取|階乘|不重複|順序)', task_desc))
+    combinatorics_ok = (not uses_combinatorics) or question_wants_combinatorics
 
     # ---- 檢查 3：數字溯源 —— 算式裡的數字必須有來源 ----
     # 【SA v2.2 重要修正】：v2.1 在這裡開了一個大洞 ——
@@ -1100,11 +1326,58 @@ def math_node(state: AgentState):
         if expr_numbers and not (expr_numbers & allowed_numbers):
             provenance_ok = False
 
-    if not syntax_ok or not has_operation or not provenance_ok:
+    # ---- 【SA v3.5 新增】檢查 4：完整性 —— 題目提到的數字都該被用到 ----
+    #
+    # 這條是「不變條件」而不是「公式」，這個區別很重要。
+    #
+    # 走錯的路：一題一題教它「分配題怎麼算、比例題怎麼算、追及問題怎麼算」——
+    #          中文應用題的型態無窮無盡，這條路跟先前的「數學動詞白名單」一樣追不完。
+    # 走對的路：不管什麼題型，正確的答案都必須滿足某些性質。
+    #          其中最好用的一條就是：題目給你的數字，你不該無視它。
+    #
+    # 實測抓到的漏算：
+    #   題目「有60顆蘋果、40顆檸檬，要分給9個人，每人各拿多少？又剩多少？」
+    #   模型只吐出 60 // 9 ; 60 % 9 —— 蘋果算完了，檸檬的 40 從頭到尾沒被碰過，
+    #   結果回覆變成「每個人可以各拿 6 個蘋果和檸檬」，把兩種水果混為一談。
+    #
+    # 只看題目本身的數字（不看帳本），因為帳本裡的數字可能是前面步驟的中間結果，
+    # 不一定每個都要在這一步用到；但題目寫出來的數字，就是使用者要你處理的東西。
+    completeness_ok = True
+    unused_numbers = set()
+    if syntax_ok and has_operation and step is not None:
+        # 【SA v3.5 防誤判】：要區分「這個數字是待計算的數量」還是「專有名詞的一部分」。
+        #
+        # 誤判案例一：任務「東京晴空塔高度 減去 台北101高度」——
+        #   101 是建築物名稱，不是數量，卻被判定成「漏算了 101」而擋下正確的 634 - 508。
+        # 誤判案例二（第一版修法過頭）：把「中文字+數字」整段刪掉，
+        #   結果「有大魚70條 小魚30條」的 70 和 30 也被一起吃掉，反而漏掉真正的漏算。
+        #
+        # 關鍵差異在【數字後面】：真正的數量後面會跟著量詞或單位（70條、60顆、9個、25片），
+        # 而專有名詞裡的數字後面通常直接接別的字或結束（台北101高度、iPhone15）。
+        # 所以改成正面表列：只認「數字 + 量詞」這種樣式。
+        question_numbers = set(re.findall(r'(\d+(?:\.\d+)?)\s*(?=[顆個條片張份人位隻本台把杯瓶包盒袋箱元塊克公斤公克公尺公里秒分時天週月年%％]|$|[\s,，、。？?!！])', task_desc))
+        expr_numbers = _numbers_in(expr)
+        # 排除 0 和 1 這種常見的中性常數，避免誤判
+        question_numbers -= {"0", "1"}
+        unused_numbers = question_numbers - expr_numbers
+        if question_numbers and unused_numbers:
+            completeness_ok = False
+
+    if not syntax_ok or not has_operation or not provenance_ok or not combinatorics_ok or not completeness_ok:
         if not syntax_ok:
             reason = f"算式含有非數學字元(抽取結果：{expr!r})"
         elif not has_operation:
             reason = f"算式沒有任何運算，只是一個孤立的數字(抽取結果：{expr!r})，這代表它沒有真的在計算"
+        elif not combinatorics_ok:
+            reason = (f"題目並不是在問組合或排列，卻使用了 comb/perm/factorial"
+                      f"(抽取結果：{expr[:80]!r})。分配、平分、相差這類題目請用 + - * / // % 就好")
+        elif not completeness_ok:
+            # 【SA v3.5】：把漏掉的數字明確寫進失敗訊息，
+            # 下一次重試時 math_node 會讀到這行，直接告訴模型「你漏了什麼」，
+            # 比讓它盲目重猜有效得多。
+            miss = "、".join(sorted(unused_numbers))
+            reason = (f"算漏了：題目裡的數字 {miss} 在算式中完全沒有被使用"
+                      f"(抽取結果：{expr[:80]!r})。題目給的每個數字都要處理到")
         else:
             reason = f"算式中的數字({expr!r})既不在事實帳本、也不在題目文字裡，疑似模型憑記憶編造"
         print(f"[算盤法師] ⚠️ {reason}")
@@ -1114,36 +1387,48 @@ def math_node(state: AgentState):
             "retry_count": retry_count, "math_calls": math_calls
         }
 
-    print(f"[算盤法師 Math_Agent] 正在使用魔法計算機: {expr}")
+    # 【SA v3.4】：逐條計算。單條時行為與舊版完全相同；
+    # 多條時每條各自送進計算機，結果一起回報，供盜賊客服組成完整答案。
     from tools.calculator import calculate_math
-    result = calculate_math(expr)
+    results = []
+    for e in sub_exprs:
+        print(f"[算盤法師 Math_Agent] 正在使用魔法計算機: {e}")
+        r = calculate_math(e)
+        if r.startswith("計算失敗"):
+            return {
+                "messages": [AIMessage(name="Math_Agent", content=f"{STATUS_FAIL} {r}")],
+                "plan": plan, "facts": facts,
+                "retry_count": retry_count, "math_calls": math_calls
+            }
+        results.append((e, _extract_calc_value(r)))
 
-    if result.startswith("計算失敗"):
-        return {
-            "messages": [AIMessage(name="Math_Agent", content=f"{STATUS_FAIL} {result}")],
-            "plan": plan, "facts": facts,
-            "retry_count": retry_count, "math_calls": math_calls
-        }
+    # 組成人類看得懂的結果字串
+    # 【SA v3.6 修正】：不要把原始算式直接寫進帳本。
+    # 實測畫面：使用者看到的回覆是「剩下的蘋果有 60 % 9 = 6 個」——
+    # 對一般人來說 % 讀起來是「百分之」，整句話變得莫名其妙。
+    # 帳本內容會被盜賊客服直接引用，所以在這裡就先翻成中文說法。
+    def _humanize(e: str) -> str:
+        h = e
+        h = re.sub(r'(\d+(?:\.\d+)?)\s*//\s*(\d+(?:\.\d+)?)', r'\1 除以 \2 取整數', h)
+        h = re.sub(r'(\d+(?:\.\d+)?)\s*%\s*(\d+(?:\.\d+)?)', r'\1 除以 \2 的餘數', h)
+        return h
+
+    if len(results) == 1:
+        result_text = results[0][1]
+    else:
+        result_text = "、".join(f"{_humanize(e)} = {v}" for e, v in results)
 
     if step is not None:
         step["status"] = "done"
-        step["result"] = result
-        # 【SA v2.3 修正】：帳本只存「乾淨的數值」，不要存整串工具輸出。
-        # 實測 log 顯示，v2.2 把 "計算成功！算式 'comb(10, 3)' 的結果為：120" 整串塞進帳本，
-        # 而 Final_Answer 拿到帳本後直接照抄，面試官看到的回覆變成
-        # 「根據事實帳本，我查詢到了答案。計算成功！算式 'comb(10, 3)' 的結果為：120」——
-        # 內部術語和工具原始字串全部外洩，鐵則 5 形同虛設。
-        # 在源頭就把數值切乾淨，比事後叫模型「不要說出內部字眼」可靠得多。
-        facts[step["target"]] = _extract_calc_value(result)
+        step["result"] = result_text
+        facts[step["target"]] = result_text
     else:
-        facts[f"計算：{expr}"] = _extract_calc_value(result)
+        facts[f"計算：{expr}"] = result_text
 
-    # 【SA v2.4】：這行原本印的是計算機的完整輸出，讓人誤以為帳本沒清乾淨。
-    # 實際存進帳本的一直都是清洗後的數值，這裡改印同一個值，log 與實際狀態才一致。
-    print(f"[算盤法師 Math_Agent] 📒 已登錄：{task_desc} ＝ {_extract_calc_value(result)}")
+    print(f"[算盤法師 Math_Agent] 📒 已登錄：{task_desc} ＝ {result_text}")
 
     return {
-        "messages": [AIMessage(name="Math_Agent", content=f"{STATUS_OK}\n【計算機結果】\n{result}")],
+        "messages": [AIMessage(name="Math_Agent", content=f"{STATUS_OK}\n【計算機結果】\n{result_text}")],
         "plan": plan,
         "facts": facts,
         "retry_count": retry_count,
@@ -1165,6 +1450,83 @@ def math_grader(state: AgentState) -> str:
         return "pass"
     print("[算盤鑑定士 f-Math] ✅ 計算結果合格，放行給主管召喚師")
     return "pass"
+
+
+
+def _clean_internal_terms(raw_text: str) -> str:
+    """
+    【SA v3.0】把模型回覆裡洩漏的內部骨架清乾淨。
+
+    抽成獨立函式的理由：極簡版與完整版兩條路徑都要用同一套清洗規則，
+    寫在節點裡就得複製兩份，日後改一邊忘另一邊必定出事。
+
+    這裡擋兩類東西：
+      1. 出處框架：「根據公司知識庫的標準解答」「我們知道」「答案是」…
+         模型會把提示裡的區塊標題當成可引用的出處名稱照抄。
+      2. 區塊標題本身：「（本輪任務完成情況：…）」「（本輪調查過程紀錄…）」
+         這是實測看到最誇張的一種 —— 模型直接把我的提示骨架印給面試官看。
+    """
+    clean_text = (raw_text or "").strip()
+    clean_text = re.sub(r'^assistant[:\s\n]*', '', clean_text, flags=re.IGNORECASE).strip()
+
+    patterns = [
+        # --- 區塊標題整段外洩（含括號包起來的形式）---
+        # 【SA v3.0 注意】：原本用 [^）)]* 會被內層括號提早截斷 ——
+        # 「（本輪調查過程紀錄(佐證用)：無）」裡面的 (佐證用) 有自己的右括號，
+        # 結果只清掉前半段、留下「：無）」這種殘骸。
+        # 改成允許吃掉內層括號，直到遇到行尾或全形右括號為止。
+        r'[（(]\s*本輪(任務完成情況|調查過程紀錄|調查紀錄)[\s\S]*?(?:）|\)\s*$|$)\s*',
+        r'[（(]\s*(佐證用|僅供參考)[^）)]*[）)]\s*',
+        r'^【?(本輪任務完成情況|本輪調查過程紀錄|上一輪聊了什麼|本次查證到的資料|這一題的參考答案)】?[：:].*$',
+        # --- 出處框架 ---
+        r'根據(公司)?知識庫的?(標準)?(解答|答案|內容|資料)[，,、：:]?\s*',
+        r'根據(事實帳本|查證資料|調查紀錄|工作紀錄|參考答案)(的[\u4e00-\u9fff]{0,4})?[，,、]?\s*',
+        r'(事實帳本|查證資料|本輪調查紀錄|內部紀錄)(中|裡|裡面)?[的]?',
+        r'根據\s*(Math_Agent|Search_Agent|Final_Answer|Supervisor|Planner)\s*(的[\u4e00-\u9fff]{0,4})?[，,、]?\s*',
+        r'我們知道[，,、：:]?\s*',
+        r'^(因此[，,]?\s*)?答案(是|為)[：:]?\s*',
+        # --- 罐頭開場白 ---
+        r'^我可以回答你的問題了[。.]?\s*',
+        r'^你想知道我?會?哪些[\u4e00-\u9fff]{0,6}嗎[？?]\s*',
+        # --- 工具原始輸出 ---
+        r'計算成功！?\s*',
+        r'算式\s*[\'"][^\'"]*[\'"]\s*的結果為[：:]\s*',
+    ]
+
+    lines = clean_text.split("\n")
+    cleaned = []
+    for line in lines:
+        for pat in patterns:
+            line = re.sub(pat, '', line, flags=re.MULTILINE)
+        cleaned.append(line)
+    clean_text = "\n".join(cleaned)
+
+    clean_text = re.sub(r'^[，,、。：:\s]+', '', clean_text)
+    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
+
+    # 【SA v3.3 新增】：複讀偵測 —— 最後一道防線。
+    #
+    # 實測災情：「談談你的 DevOps 與 CI/CD 經驗」那題，模型把同一句
+    # 「他熟練掌握 Docker 微服務容器化與 Image 打包…」連續輸出了幾十遍，
+    # 整個聊天視窗被洗版。就算上游已經做了素材去重，
+    # 小模型仍有機率自己陷進迴圈，所以這裡再擋一次。
+    #
+    # 作法：依句子切開，看到內容重複出現過的句子就停在那裡（保留前面正常的部分）。
+    sentences = re.split(r'(?<=[。！？!?\n])', clean_text)
+    kept, seen = [], set()
+    for s in sentences:
+        key = re.sub(r'\s+', '', s)
+        if len(key) < 12:          # 太短的句子（例如「好的。」）不參與去重
+            kept.append(s)
+            continue
+        if key in seen:
+            print("[盜賊客服 Final_Answer] 🔁 偵測到複讀，已截斷重複內容。")
+            break
+        seen.add(key)
+        kept.append(s)
+    clean_text = "".join(kept)
+
+    return clean_text.strip()
 
 
 # 【4. 盜賊客服房間】
@@ -1245,17 +1607,31 @@ def final_answer_node(state: AgentState):
     if not scratch_str:
         scratch_str = "（本輪沒有動用搜尋或計算工具）"
 
+    # 【SA v2.9 重大修正】：歷史對話污染是「每題開頭都在自我介紹」的元凶。
+    #
+    # 病灶：第一題問自我介紹，盜賊客服回了一段自我介紹，這段被存進 chat_history。
+    # 之後每一題，這段自我介紹都會被當成「歷史」塞進提示裡。
+    # XUYA 是 8B 小模型，分不清「歷史僅供語意連貫」和「要照著回」，
+    # 就把整段自我介紹又抄一遍當開頭 —— 而且越積越多。
+    # 更慘的是 101 那題：前面硬抄的自我介紹把 num_ctx 4096 塞爆，
+    # 真正的搜尋結果與計算數字被擠出上下文，於是它說「資訊不足」。
+    #
+    # 修法有三層：
+    #   1. 只保留【最近一輪】對話（不是全部），大幅減少被抄的素材
+    #   2. 每則截到 60 字（連貫語意只需要知道剛剛聊到什麼，不需要全文）
+    #   3. 提示裡把歷史的定位講得更死：只用來判斷「這題是不是延續前一題」，
+    #      不是拿來抄的內容
     history_str = ""
     hist = list(state.get("chat_history", []))
     if hist:
-        for msg in hist:
+        # 只取最後一輪（一問一答 = 最多 2 則），這是連貫語意需要的最小量
+        recent = hist[-2:]
+        for msg in recent:
             role = "使用者" if isinstance(msg, HumanMessage) else "AI"
-            history_str += f"{role}: {str(msg.content)[:200]}\n"
-        # 【SA v2.6】：只保留最近的部分，同樣是為了控制 num_ctx 預算
-        if len(history_str) > 900:
-            history_str = "…（較早的對話已略過）\n" + history_str[-900:]
+            snippet = str(msg.content).replace("\n", " ")[:60]
+            history_str += f"{role}剛剛說：{snippet}…\n"
     else:
-        history_str = "（無歷史對話）"
+        history_str = "（這是本次對話的第一個問題）"
 
     # 【SA v2.1】：客服題(RAG 命中)必須讓 Final_Answer 看得到知識庫，否則它會兩手空空。
     # 但同時要標明可信度，避免它把 Fallback 撈到的不相關段落當成標準答案在講。
@@ -1272,6 +1648,70 @@ def final_answer_node(state: AgentState):
     else:
         rag_block = "【參考資料】：本次未檢索到相關內容。"
 
+    # ==========================================
+    # 【SA v3.0 重大重構】：提示詞分成「極簡版」與「完整版」兩套
+    # ==========================================
+    # 為什麼要拆？因為提示詞肥大到把模型壓垮了。
+    #
+    # 這幾版我一路往上疊：鐵則 0~10、最高優先計算警告、五個資料區塊
+    # （參考答案 / 查證資料 / 任務完成情況 / 調查紀錄 / 上一輪聊了什麼）。
+    # 對一顆 8B、num_ctx 只有 4096 的模型，這已經遠遠超載。
+    #
+    # 實測崩潰現場（真實 log）：
+    #   1. 模型把區塊標題原封不動印給面試官：
+    #        「（本輪任務完成情況：所有預定的查詢與計算項目都已完成）」
+    #        「（本輪調查過程紀錄(佐證用)：無）」
+    #   2. 弓箭手明明撈對了（兵役 48 字、柬埔寨 76 字，主題票數 5/5、4/5），
+    #      模型卻完全略過那份資料，直接把上一題的答案抄一遍。
+    #
+    # 原因不是模型笨，是它分不清「哪些是要照做的指令」「哪些是要引用的內容」
+    # 「哪些是骨架不該講出來」—— 區塊一多就全糊在一起。
+    #
+    # 解法：依情境給不同複雜度的提示。
+    #   90% 的題目是「RAG 命中 → 照著標準答案講」，這種只需要極簡提示，
+    #   完全不需要計算警告、任務清單、調查紀錄那一整套。
+    #   只有真的動用了搜尋／計算工具時，才需要完整版。
+    used_tools = bool(plan) or bool(facts)
+
+    if rag_hit_type == "manual" and not used_tools:
+        # ---------- 極簡版：知識庫命中，照著講就好 ----------
+        # 【設計原則】：段落越少、指令越短，小模型越不會亂抄。
+        # 這裡刻意【不】給上一題的答案，只給上一題的「問題」——
+        # 模型就沒有可抄的答案文本，但仍能理解「裡面」「那個」指的是什麼。
+        prev_q = ""
+        hist = list(state.get("chat_history", []))
+        for m in reversed(hist):
+            if isinstance(m, HumanMessage):
+                prev_q = str(m.content)[:50]
+                break
+
+        context_line = f"（面試官上一題問的是：{prev_q}）\n" if prev_q else ""
+
+        sys_msg = SystemMessage(content=(
+            "你是張序亞（Steven）的面試 AI 助理，正在回答面試官的提問。\n\n"
+            f"{context_line}"
+            f"面試官這一題問：{current_question}\n\n"
+            f"這一題的參考答案：\n{rag_context}\n\n"
+            "請用自然、專業的口吻，把上面的參考答案講給面試官聽。\n"
+            "1. 【最重要】只能講參考答案裡有的內容。"
+            "【嚴禁】補充任何參考答案裡沒有的技術名詞、程式語言、專案或經歷 ——"
+            "你記憶中的東西一律不算數，寧可少講也不要編。"
+            "如果參考答案沒有回答到面試官問的點，就誠實說這部分建議面試時直接跟序亞聊。\n"
+            "2. 主語一律用「他」或「序亞」，不要用「我們」；"
+            "只有介紹「你自己是誰」時才用「我」。\n"
+            "3. 直接講內容，不要有「我可以回答你了」「你想知道…嗎」這種開場白，"
+            "也不要加括號註記或說明你的思考過程。\n"
+            "4. 只回答這一題，不要重複前面聊過的內容。"
+        ))
+        response = invoke_with_timeout(main_llm, [sys_msg])
+        clean_text = _clean_internal_terms(response.content)
+        print(f"[盜賊客服 Final_Answer] 📝 採用極簡提示（知識庫命中，未動用工具）")
+        return {
+            "messages": [AIMessage(name="Final_Answer", content=clean_text)],
+            "all_steps_done": True
+        }
+
+    # ---------- 完整版：有動用搜尋／計算工具時才用 ----------
     sys_msg = SystemMessage(content=(
         # 【SA v2.6 重大修正】：這裡原本寫「你是一位專業的 AI 助理。」
         #
@@ -1291,15 +1731,19 @@ def final_answer_node(state: AgentState):
         f"【本次查證到的資料 ── 這是你唯一可以引用的『外部查詢數字』來源】：\n{_render_facts(facts)}\n\n"
         f"【本輪任務完成情況】：\n{gap_note}\n\n"
         f"【本輪調查過程紀錄(佐證用)】：\n{scratch_str}\n\n"
-        f"【過去對話歷史，僅供語意連貫參考】：\n{history_str}\n\n"
+        f"【上一輪聊了什麼，只用來判斷本題是否延續前文，不是要你複述】：\n{history_str}\n\n"
         "請嚴格遵守：\n"
         "【鐵則 0 ── 參考答案優先】：如果上方出現【這一題的參考答案】，"
         "那就是這一題的正確內容，請用你自己的話自然地講出來，"
         "可以潤飾語氣但不要改變事實。"
         "【嚴禁】把「這一題的參考答案」「根據知識庫」「我們知道」「答案是」"
         "這類框架文字照抄進回覆——直接講內容就好，就像你本來就知道一樣。\n"
-        "【鐵則 1】：只回答『目前使用者的問題』，不要主動重複過去對話的內容。\n"
-        "【鐵則 2】：只有當問題明確延續過去對話時，才可以引用【過去對話歷史】。\n"
+        "【鐵則 1 ── 只答當前問題】：只回答『目前使用者的問題』這一題。"
+        "【嚴禁】把上一輪的自我介紹、上一題的答案，重複抄到這一題的開頭。"
+        "每一題都是獨立回答，不要用「你好，我是張序亞…」當每一題的開場白，"
+        "那段話只在使用者【第一次】問你是誰、或請你自我介紹時才需要講。\n"
+        "【鐵則 2】：只有當本題明顯是延續上一題時（例如上一題問專案、這題問『那個專案多久』），"
+        "才需要參考上一輪聊了什麼；否則完全忽略歷史，直接回答當前問題。\n"
         "【鐵則 3】：你只能使用【公司知識庫】或【本次查證到的資料】裡明確出現的數字與名稱作答，"
         "絕對不准使用你自己記憶中的人名、年份、數字！查無資料就誠實說查詢失敗，絕不編造。\n"
         "【鐵則 4 ── 最重要，絕無例外】：你【完全不會算數】。"
@@ -1326,42 +1770,7 @@ def final_answer_node(state: AgentState):
 
     response = invoke_with_timeout(main_llm, [sys_msg])
 
-    # 🛡️ 切除模型溢出的 "assistant" 標籤
-    clean_text = response.content.strip()
-    clean_text = re.sub(r'^assistant[:\s\n]*', '', clean_text, flags=re.IGNORECASE).strip()
-
-    # 【SA v2.4 新增】：Python 強制清洗內部術語。
-    #
-    # 光靠鐵則叫模型「不要說出內部字眼」是無效的 —— 實測它照樣回出
-    #   「根據事實帳本，我們知道這樣子的組合總共有 120 種。」
-    # 因為提示裡的區塊標題就寫著「事實帳本」，模型自然把它當成可引用的出處名稱。
-    #
-    # 上一版已經把標題改成中性用語，這裡再補一道 Python 後處理當作保險：
-    # 提示詞是「請求」，正則替換是「保證」，兩層一起做才不會漏。
-    _INTERNAL_TERMS = [
-        # 【SA v2.7 擴充】：補上這次實測外洩的框架用語。
-        # 這些是提示裡的區塊標題與句式，模型會把它們當成可引用的出處名稱照抄，
-        # 例如實測出現的「根據公司知識庫的標準解答，我們知道：…答案是：…」。
-        r'根據(公司)?知識庫的?(標準)?(解答|答案|內容|資料)[，,、：:]?\s*',
-        r'根據(事實帳本|查證資料|調查紀錄|工作紀錄)(的[\u4e00-\u9fff]{0,4})?[，,、]?\s*',
-        r'(事實帳本|查證資料|本輪調查紀錄|內部紀錄)(中|裡|裡面)?[的]?',
-        r'根據\s*(Math_Agent|Search_Agent|Final_Answer|Supervisor|Planner)\s*(的[\u4e00-\u9fff]{0,4})?[，,、]?\s*',
-        r'我們知道[，,、：:]?\s*',
-        r'^(因此[，,]?\s*)?答案(是|為)[：:]?\s*',
-        r'計算成功！?\s*',
-        r'算式\s*[\'"][^\'"]*[\'"]\s*的結果為[：:]\s*',
-    ]
-    # 【SA v2.7】：逐行套用，因為「答案是」那條綁了行首錨點 ^，需要對每一行分別比對
-    lines = clean_text.split("\n")
-    cleaned_lines = []
-    for line in lines:
-        for pat in _INTERNAL_TERMS:
-            line = re.sub(pat, '', line, flags=re.MULTILINE)
-        cleaned_lines.append(line)
-    clean_text = "\n".join(cleaned_lines)
-    # 清掉替換後可能留下的多餘標點與空白
-    clean_text = re.sub(r'^[，,、。\s]+', '', clean_text)
-    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+    clean_text = _clean_internal_terms(response.content)
 
     return {
         "messages": [AIMessage(name="Final_Answer", content=clean_text)],

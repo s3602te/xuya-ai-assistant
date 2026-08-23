@@ -53,6 +53,11 @@ def calculate_math(expression: str) -> str:
                     ast.Sub: operator.sub,
                     ast.Mult: operator.mul,
                     ast.Div: operator.truediv,
+                    # 【SA v3.3 新增】整數除法。
+                    # 分配題（「25顆分給7個人，每人幾顆」）需要的是整除 25 // 7 = 3，
+                    # 而不是 25 / 7 = 3.571。少了這個運算子，
+                    # 算盤法師就算翻譯正確也會在這裡拋出「不支援的運算」而失敗。
+                    ast.FloorDiv: operator.floordiv,
                     ast.Pow: operator.pow,   # 支援 ** 次方運算
                     ast.Mod: operator.mod,
                     ast.BitXor: operator.xor
