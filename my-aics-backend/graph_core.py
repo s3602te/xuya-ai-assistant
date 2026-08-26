@@ -202,7 +202,21 @@ class ExtractedFact(BaseModel):
 
 
 class MathExpression(BaseModel):
-    expression: str = Field(description="要執行的純數學算式，例如 '634 - 508'")
+    # 【SA v4.0】：欄位改成可容納「多行推導腳本」。
+    # 單行算式（634 - 508）仍然完全支援，行為不變；
+    # 但遇到後面步驟依賴前面結果的題目時，模型可以改寫成
+    #     r1 = 75 % 8
+    #     total = r1 + r2 + r3
+    #     stickers = total // 3
+    # 讓依賴關係由變數表達，而不是逼模型在一行裡湊出巢狀算式。
+    expression: str = Field(
+        description=(
+            "要執行的數學內容。簡單題直接寫一行算式，例如 '634 - 508'；"
+            "如果後面的步驟需要用到前面算出來的結果，就寫成多行、每行一個變數指派，"
+            "例如 'r1 = 75 % 8\\nr2 = 52 % 8\\ntotal = r1 + r2\\nstickers = total // 3'。"
+            "只能包含數字、變數名與 + - * / // % ** 運算，不要有任何中文或說明文字。"
+        )
+    )
 
 
 # ==========================================
@@ -1226,14 +1240,34 @@ def math_node(state: AgentState):
         "7. 除了分號之外，【不要】輸出任何其他符號或文字，"
         "特別是不要在算式前面加冒號、等號或「答案」兩個字。\n"
         "8. 【題目給的每個數字都要用到】：如果題目寫了 60、40、9 三個數字，"
-        "你的算式就必須把這三個數字都處理到，不可以只算其中一部分。"
+        "你的算式就必須把這三個數字都處理到，不可以只算其中一部分。\n"
+        # 【SA v4.0 新增】：教它處理「後面的步驟需要前面的結果」這種題型。
+        # 這是文具福袋題翻車的直接原因 —— 模型無法在一行裡表達步驟依賴，
+        # 只好用猜的，把「每袋幾本」當成「剩下幾本」拿去換貼紙。
+        "9. 【多步驟推導請用變數】：如果後面的計算需要用到前面算出來的結果，"
+        "請改寫成多行，每行一個變數指派，用變數名表達依賴關係。例如：\n"
+        "題目「75本、52支、38瓶分成8袋各剩多少？把剩下的每3件換1張貼紙可換幾張？」\n"
+        "正確寫法（注意：換貼紙用的是【餘數】r1 r2 r3，不是每袋數量）：\n"
+        "r1 = 75 % 8\n"
+        "r2 = 52 % 8\n"
+        "r3 = 38 % 8\n"
+        "q1 = 75 // 8\n"
+        "q2 = 52 // 8\n"
+        "q3 = 38 // 8\n"
+        "total_rem = r1 + r2 + r3\n"
+        "stickers = total_rem // 3\n"
+        "leftover = total_rem % 3\n"
+        "變數名請取得有意義（r=餘數、q=每份數量），這樣你自己也比較不會混淆。"
         + retry_hint
     ))
 
     # 【SA v2 隔離重點】：刻意「不」傳入 msgs，只給乾淨的帳本與任務描述
     math_req = extractor.invoke([sys_msg, HumanMessage(content=f"請翻譯這個計算任務：{task_desc}")])
 
-    expr = (math_req.expression or "").strip()
+    # 【SA v4.0】：保留模型的原始輸出，清理失敗時才有東西可以看。
+    # 之前「抽取結果：''」那個 log 完全看不出模型到底吐了什麼，無從診斷。
+    raw_expr = (math_req.expression or "")
+    expr = raw_expr.strip()
 
     # 【SA v3.6 修正】：清理算式前後的雜訊字元。
     #
@@ -1258,13 +1292,62 @@ def math_node(state: AgentState):
 
     expr = _trim_to_math(expr)
 
-    # 【SA v3.4】：拆成多條算式分別驗證與計算（沒有分號時就是單條，行為不變）
-    # 【SA v3.6】：每一條子算式也各自做邊界清理，
-    # 因為雜訊可能黏在中間某一條的頭尾（例如 "60 // 9 ; ' 40 // 9"）。
+    # ---- 【SA v4.0】鏈式推導：多行腳本優先走 calculate_script ----
+    #
+    # 為什麼要有這條路？實測「文具福袋題」暴露了單行算式的極限：
+    #   「75本、52支、38瓶分成8袋各剩多少？再把剩下的每3件換1張貼紙」
+    # 第二小題必須先知道三個餘數（3、4、6）加起來是 13，才能算 13 // 3。
+    # 但規劃節點開場時不可能知道餘數是多少，模型也無法在一行裡表達這種依賴，
+    # 結果它把「每袋幾本」(9+6+4) 當成「剩下幾本」除以 3，答出 6 張貼紙（正解 4 張）。
+    #
+    # 讓模型用變數寫幾行推導，依賴關係就由變數本身表達，
+    # 而且執行過程完全確定 —— 不需要跑多輪迴圈、不需要模型記得中間結果。
+    if "\n" in expr or re.search(r'^[A-Za-z_]\w*\s*=', expr.strip(), re.M):
+        from tools.calculator import calculate_script
+        script_res = calculate_script(expr)
+        if script_res["ok"]:
+            steps_txt = "、".join(
+                f"{name or '結果'} = {e} → {v}" for name, e, v in script_res["steps"]
+            )
+            final_vars = script_res["vars"]
+            print(f"[算盤法師 Math_Agent] 🔗 鏈式推導成功（{len(script_res['steps'])} 步）")
+            for name, e, v in script_res["steps"]:
+                print(f"           {str(name or '(算式)'):12} = {e:28} → {v}")
+            if step is not None:
+                step["status"] = "done"
+                step["result"] = steps_txt
+                facts[step["target"]] = steps_txt
+            else:
+                facts["推導結果"] = steps_txt
+            return {
+                "messages": [AIMessage(name="Math_Agent",
+                                       content=f"{STATUS_OK}\n【逐步推導結果】\n{steps_txt}")],
+                "plan": plan, "facts": facts,
+                "retry_count": retry_count, "math_calls": math_calls
+            }
+        print(f"[算盤法師 Math_Agent] ⚠️ 鏈式推導失敗（{script_res['message']}），改以單行算式流程處理。")
+
+    # 【SA v4.0】：拆成多條算式分別驗證與計算（沒有分號時就是單條，行為不變）
     sub_exprs = [_trim_to_math(e) for e in expr.split(";")]
     sub_exprs = [e for e in sub_exprs if e]
     if not sub_exprs:
-        sub_exprs = [expr]
+        sub_exprs = [expr] if expr else []
+
+    # 【SA v4.0 修正】：空算式要有自己的錯誤訊息。
+    # 實測「45支鉛筆28塊橡皮擦分5位同學」那題，抽取結果是空字串，
+    # 但錯誤訊息卻是「算式含有非數學字元(抽取結果：'')」——
+    # 這句話對模型完全沒有指導性，重試時它不知道要改什麼，於是連續三次都吐空字串。
+    if not sub_exprs:
+        print(f"[算盤法師] ⚠️ 模型沒有產出任何算式（原始輸出：{raw_expr[:60]!r}）")
+        return {
+            "messages": [AIMessage(name="Math_Agent", content=(
+                f"{STATUS_FAIL} 無法產生有效算式：你這次沒有輸出任何算式（結果是空的）。"
+                f"請務必寫出實際的數學算式，例如 45 // 5 ; 45 % 5 ; 28 // 5 ; 28 % 5，"
+                f"不要只回覆文字說明或空白。"
+            ))],
+            "plan": plan, "facts": facts,
+            "retry_count": retry_count, "math_calls": math_calls
+        }
 
     # ---- 檢查 1：語法合法性(允許 comb/perm/factorial) ----
     # 【SA v3.4 修正】：白名單補上 % 與 //。
@@ -1529,6 +1612,59 @@ def _clean_internal_terms(raw_text: str) -> str:
     return clean_text.strip()
 
 
+def _answer_numbers_traceable(answer: str, facts: dict, question: str):
+    """
+    【SA v4.1 新增】輸出層的數字溯源檢查 —— 第五道不變條件。
+
+    為什麼需要這道？因為前四道不變條件全部作用在【算盤法師】身上，
+    盜賊客服在寫最終回覆時，完全沒有程式碼在監督它有沒有亂編數字，
+    只靠提示詞裡的鐵則 3 —— 而我們早就知道提示是請求、不是保證。
+
+    實測災情（寶石題）：
+      計算機算出 (32+25)//7 = 8、(32+25)%7 = 1，兩個數字都正確；
+      但盜賊客服看到題目提到「紅寶石」「藍寶石」兩種，就自作主張分開算，
+      回覆變成「每人 8 顆紅寶石和 3.57 顆藍寶石，剩下紅寶石 4 個、藍寶石 2 個」。
+      3.57、4、2 這三個數字計算機從來沒算過 —— 工具全對，最後一棒把答案編掉。
+
+    這是最危險的錯誤類型：log 全綠、鑑定士放行，但使用者拿到假答案。
+
+    回傳 (是否全部可溯源, 無法溯源的數字集合)
+    """
+    allowed = set()
+    for k, v in facts.items():
+        allowed |= _numbers_in(str(k))
+        allowed |= _numbers_in(str(v))
+    allowed |= _numbers_in(question)
+    # 【SA v4.1】：把題目數字之間的「常見中間結果」也算成合法來源。
+    # 例如寶石題「32 顆 + 25 顆混在一起」，回覆講「共 57 顆」是完全正確的推理，
+    # 但 57 不在帳本裡（帳本存的是 (32+25)//7 = 8），少了這一步就會誤擋正確答案。
+    # 只補加總與差值這兩種最常見的中間量，不做更複雜的推導。
+    q_nums = [n for n in _numbers_in(question)]
+    for i, a in enumerate(q_nums):
+        for b in q_nums[i + 1:]:
+            try:
+                fa, fb = float(a), float(b)
+                for mid in (fa + fb, abs(fa - fb)):
+                    allowed.add(str(int(mid)) if mid == int(mid) else str(mid))
+            except ValueError:
+                continue
+    # 常見的中性數字（序號、一半、百分比基準…）不列入追查，避免誤判
+    allowed |= {"0", "1", "2", "3", "10", "100"}
+
+    answer_numbers = _numbers_in(answer)
+    unknown = answer_numbers - allowed
+    return (not unknown), unknown
+
+
+def _render_allowed_numbers(facts: dict, question: str) -> str:
+    """把「這一題可以使用的數字」整理成一行，供重寫時明確告知模型。"""
+    allowed = set()
+    for k, v in facts.items():
+        allowed |= _numbers_in(str(v))
+    allowed |= _numbers_in(question)
+    return "、".join(sorted(allowed, key=lambda x: (len(x), x))) or "（沒有任何可用數字）"
+
+
 # 【4. 盜賊客服房間】
 def final_answer_node(state: AgentState):
     print("\n[盜賊客服 Final_Answer] 資料收集完畢，正在撰寫最終回覆給客人...")
@@ -1771,6 +1907,46 @@ def final_answer_node(state: AgentState):
     response = invoke_with_timeout(main_llm, [sys_msg])
 
     clean_text = _clean_internal_terms(response.content)
+
+    # 【SA v4.1】：輸出層數字溯源 —— 發現編造就給一次重寫機會。
+    #
+    # 只在「有動用工具」的路徑做這道檢查，因為這時候才有明確的數字來源可以比對。
+    # 純知識問答（履歷題）不做，那類回答本來就會出現知識庫裡的各種年份與數量。
+    if facts:
+        ok, unknown = _answer_numbers_traceable(clean_text, facts, current_question)
+        if not ok:
+            bad = "、".join(sorted(unknown))
+            print(f"[盜賊客服 Final_Answer] 🚨 偵測到回覆中有無法溯源的數字：{bad}，要求重寫一次。")
+            retry_msg = SystemMessage(content=(
+                "你是張序亞（Steven）的面試 AI 助理。\n\n"
+                f"面試官的問題：{current_question}\n\n"
+                f"【這一題唯一可以使用的數字】：{_render_allowed_numbers(facts, current_question)}\n\n"
+                f"【已經算出來的結果】：\n{_render_facts(facts)}\n\n"
+                f"⚠️ 你上一次的回覆出現了 {bad} 這些數字，"
+                "它們【不在】上面的結果裡，是你自己編的。\n\n"
+                "請重寫一次回覆。硬性規定：\n"
+                "1. 只能使用上面列出的數字，一個都不准多。\n"
+                "2. 【不要】自己把題目拆成好幾份分開計算 —— "
+                "上面的結果已經是完整答案了，照著講就好。\n"
+                "3. 如果上面的結果沒有涵蓋到問題的某個部分，"
+                "就誠實說那部分沒有算出來，不要用猜的補上。\n"
+                "4. 直接講結論，不要開場白，不要加括號註記。"
+            ))
+            response2 = invoke_with_timeout(main_llm, [retry_msg])
+            clean_text2 = _clean_internal_terms(response2.content)
+            ok2, unknown2 = _answer_numbers_traceable(clean_text2, facts, current_question)
+            if ok2:
+                print("[盜賊客服 Final_Answer] ✅ 重寫後所有數字都可溯源。")
+                clean_text = clean_text2
+            else:
+                # 【SA v4.1】重寫還是編 → 不再讓模型自由發揮，直接用確定性模板輸出。
+                # 寧可講得像機器人，也不要給面試官一個看起來很順但數字是假的答案。
+                print(f"[盜賊客服 Final_Answer] 🛑 重寫後仍有編造數字（{'、'.join(sorted(unknown2))}），改用確定性模板輸出。")
+                clean_text = (
+                    f"{current_question}\n\n"
+                    "計算結果如下：\n"
+                    + "\n".join(f"・{k} ＝ {v}" for k, v in facts.items())
+                )
 
     return {
         "messages": [AIMessage(name="Final_Answer", content=clean_text)],
