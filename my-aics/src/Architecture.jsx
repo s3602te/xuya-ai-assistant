@@ -232,14 +232,24 @@ flowchart TD
   // ============================
 
 
-  // ============================
+// ============================
   // 視窗與容器滾動控制開始
   // ============================
   useEffect(() => {
-    // 1. 處理行動裝置或切換頁面時的捲軸位置殘留問題：強制將全域視窗滾動至最頂部
+    // 1. 強制隱藏瀏覽器外層捲軸，避免產生雙捲軸
+    document.body.style.overflow = 'hidden';
+
+    // 2. 離開頁面時自動復原，確保不影響其他頁面
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
+  useEffect(() => {
+    // 3. 處理行動裝置或切換頁面時的捲軸位置殘留問題
     window.scrollTo(0, 0);
 
-    // 2. 若頁面已解鎖且內部容器成功掛載，將內部容器也重置回頂部
+    // 4. 若頁面已解鎖且內部容器成功掛載，將內部容器重置回頂部
     if (isUnlocked && containerRef.current) {
       containerRef.current.scrollTop = 0;
     }
@@ -325,9 +335,9 @@ flowchart TD
   // ============================
   // 畫面 B：系統架構圖 (解鎖狀態) 渲染開始
   // ============================
-  return (
-    // 1. 最外層滿版主視窗容器，將 containerRef 綁定於此確保滾動條重置邏輯生效
-    <div ref={containerRef} className="w-full h-[100dvh] p-8 pt-14 md:pt-8 bg-gray-50 overflow-y-auto animate-fade-in transition-all duration-300">
+return (
+    // 1. 最外層主視窗容器：設定 h-screen 與 overflow-y-auto，並加上 pb-24 保證能滑過第 10 張卡片
+    <div ref={containerRef} className="w-full h-screen p-6 md:p-8 pt-14 md:pt-8 pb-24 bg-gray-50 overflow-y-auto animate-fade-in transition-all duration-300">
 
       {/* ============================ */}
       {/* 靜態圖片點擊放大全螢幕 (Lightbox) 彈窗區塊開始 */}
@@ -353,7 +363,7 @@ flowchart TD
       {/* ============================ */}
 
       {/* 2. 內容最大寬度與置中容器 */}
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-7xl 2xl:max-w-[1600px] mx-auto transition-all duration-300">
 
 {/* ============================ */}
         {/* 標題與版本切換按鈕區塊開始        */}
@@ -387,82 +397,79 @@ flowchart TD
         {/* 標題與版本切換按鈕區塊結束        */}
         {/* ============================ */}
 
-        {/* ============================ */}
-        {/* 架構圖展示區 (靜態圖片) 開始     */}
-        {/* ============================ */}
-        <div className="w-full bg-white rounded-xl mb-8 shadow-lg overflow-hidden border border-gray-200 transition-opacity duration-300">
-          {/* 1. 圖片頂部標題列與放大提示 */}
-          <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 text-sm font-bold text-gray-600 flex justify-between items-center">
-            <span>
-              {activeVersion === 0 && "V1.0 LINE 企業客服 (靜態總覽)"}
-              {activeVersion === 1 && "V2.0 Web 全端 AI 助理 (靜態總覽)"}
-              {activeVersion === 2 && "V3.0 多智能體協作架構 (靜態總覽)"}
-            </span>
-            <span
-              className="text-xs text-blue-500 cursor-pointer hover:underline font-semibold"
-              onClick={() => setLightboxImage(activeVersion === 0 ? archImageV1 : (activeVersion === 1 ? archImageV2 : archImageV3))}
-            >
-              🔍 點擊放大
-            </span>
-          </div>
-          {/* 2. 靜態圖片渲染區塊：使用 object-contain 與淺色背景，配合 PNG 圖片保證不裁切且完美顯示 */}
-          <div className="bg-gray-50 flex justify-center w-full">
-            <img
-              src={activeVersion === 0 ? archImageV1 : (activeVersion === 1 ? archImageV2 : archImageV3)}
-              alt="專案系統架構圖"
-              className="w-full max-h-[500px] object-contain block animate-fade-in cursor-zoom-in hover:opacity-90 transition-opacity"
-              onClick={() => setLightboxImage(activeVersion === 0 ? archImageV1 : (activeVersion === 1 ? archImageV2 : archImageV3))}
-            />
-          </div>
-        </div>
-        {/* ============================ */}
-        {/* 架構圖展示區 (靜態圖片) 結束     */}
-        {/* ============================ */}
-
-        {/* ============================ */}
-        {/* 架構圖展示區 (Mermaid 終端機) 開始 */}
-        {/* ============================ */}
-        <div className={isMermaidFullscreen
-          ? "fixed inset-0 z-[80] bg-black p-4 flex flex-col animate-fade-in"
-          : "w-full bg-black rounded-xl border border-gray-700 shadow-2xl overflow-hidden mb-8 transition-all duration-300"
-        }>
-          {/* 1. 終端機頂部控制列 */}
-          <div className="bg-gray-800 px-4 py-2 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-3 h-3 rounded-full bg-red-500 cursor-pointer" onClick={() => setIsMermaidFullscreen(false)}></div>
-              <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-              <div className="w-3 h-3 rounded-full bg-green-500 cursor-pointer" onClick={() => setIsMermaidFullscreen(!isMermaidFullscreen)}></div>
-              <span className="ml-4 text-gray-400 text-xs font-mono">
-                {activeVersion === 0 ? "architecture_v1_line.md" : "architecture_v2_web.md"} - Mermaid Live Preview
+{/* ============================================================ */}
+        {/* 圖表展示雙欄網格（桌機版 lg: 左右並排 / 手機版單欄堆疊）開始 */}
+        {/* ============================================================ */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8 items-stretch">          
+          {/* 左側：PNG 靜態架構總覽 */}
+          <div className="w-full h-[520px] bg-white rounded-xl shadow-xl overflow-hidden border border-gray-200 flex flex-col transition-all duration-300">
+            {/* 1. 圖片頂部標題列 */}
+            <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 text-sm font-bold text-gray-600 flex justify-between items-center shrink-0">
+              <span>
+                {activeVersion === 0 && "V1.0 LINE 企業客服 (靜態總覽)"}
+                {activeVersion === 1 && "V2.0 Web 全端 AI 助理 (靜態總覽)"}
+                {activeVersion === 2 && "V3.0 多智能體協作架構 (靜態總覽)"}
+              </span>
+              <span
+                className="text-xs text-blue-500 cursor-pointer hover:underline font-semibold"
+                onClick={() => setLightboxImage(activeVersion === 0 ? archImageV1 : (activeVersion === 1 ? archImageV2 : archImageV3))}
+              >
+                🔍 點擊放大
               </span>
             </div>
-            {/* 2. 全螢幕切換按鈕 */}
-            <button
-              onClick={() => setIsMermaidFullscreen(!isMermaidFullscreen)}
-              className="text-gray-400 hover:text-white text-lg transition-colors font-bold"
-              title={isMermaidFullscreen ? "還原視窗" : "全螢幕放大"}
-            >
-              {isMermaidFullscreen ? "✖" : "⛶"}
-            </button>
-          </div>
-
-          {/* 3. 【核心修復：防裁切的滾動區塊】 */}
-          {/* 使用 overflow-auto 允許自由滾動，並利用 w-fit mx-auto 保證過大的圖表不會被 flex 置中裁斷左半邊 */}
-          <div className="flex-1 p-6 overflow-auto bg-gray-900 cursor-move">
-            <div className="w-fit mx-auto">
-              {/* 4. 利用 key 強制 React 銷毀並重建 DOM 節點，解決 Mermaid 無法動態重繪的問題 */}
-              <pre key={`${activeVersion}-${isMermaidFullscreen}`} className="mermaid text-sm animate-fade-in">
-                {activeVersion === 0 && mermaidCodeV1}
-                {activeVersion === 1 && mermaidCodeV2}
-                {activeVersion === 2 && mermaidCodeV3}
-              </pre>
+            {/* 2. 圖片展示區塊 */}
+            <div className="bg-gray-50 flex-1 flex items-center justify-center p-2 overflow-hidden">
+              <img
+                src={activeVersion === 0 ? archImageV1 : (activeVersion === 1 ? archImageV2 : archImageV3)}
+                alt="專案系統架構圖"
+                className="w-full h-full object-contain block animate-fade-in cursor-zoom-in hover:opacity-95 transition-opacity"
+                onClick={() => setLightboxImage(activeVersion === 0 ? archImageV1 : (activeVersion === 1 ? archImageV2 : archImageV3))}
+              />
             </div>
           </div>
-        </div>
-        {/* ============================ */}
-        {/* 架構圖展示區 (Mermaid 終端機) 結束 */}
-        {/* ============================ */}
 
+          {/* 右側：Mermaid 終端機即時預覽 */}
+          <div className={isMermaidFullscreen
+            ? "fixed inset-0 z-[80] bg-black p-4 flex flex-col animate-fade-in"
+            : "w-full h-[520px] bg-black rounded-xl border border-gray-700 shadow-xl overflow-hidden flex flex-col transition-all duration-300"
+          }>
+            {/* 1. 終端機頂部控制列 */}
+            <div className="bg-gray-800 px-4 py-2 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded-full bg-red-500 cursor-pointer" onClick={() => setIsMermaidFullscreen(false)}></div>
+                <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+                <div className="w-3 h-3 rounded-full bg-green-500 cursor-pointer" onClick={() => setIsMermaidFullscreen(!isMermaidFullscreen)}></div>
+                <span className="ml-4 text-gray-400 text-xs font-mono">
+                  {activeVersion === 0 && "architecture_v1_line.md"}
+                  {activeVersion === 1 && "architecture_v2_web.md"}
+                  {activeVersion === 2 && "architecture_v3_agent.md"} - Mermaid Live Preview
+                </span>
+              </div>
+              {/* 2. 全螢幕切換按鈕 */}
+              <button
+                onClick={() => setIsMermaidFullscreen(!isMermaidFullscreen)}
+                className="text-gray-400 hover:text-white text-lg transition-colors font-bold"
+                title={isMermaidFullscreen ? "還原視窗" : "全螢幕放大"}
+              >
+                {isMermaidFullscreen ? "✖" : "⛶"}
+              </button>
+            </div>
+
+            {/* 3. 滾動區塊 */}
+            <div className="flex-1 p-4 overflow-auto bg-gray-900 cursor-move">
+              <div className="w-fit mx-auto min-w-full flex justify-center">
+                <pre key={`${activeVersion}-${isMermaidFullscreen}`} className="mermaid text-xs md:text-sm animate-fade-in">
+                  {activeVersion === 0 && mermaidCodeV1}
+                  {activeVersion === 1 && mermaidCodeV2}
+                  {activeVersion === 2 && mermaidCodeV3}
+                </pre>
+              </div>
+            </div>
+          </div>         
+        </div>
+        {/* ============================================================ */}
+        {/* 圖表展示雙欄網格（桌機版 lg: 左右並排 / 手機版單欄堆疊）結束 */}
+        {/* ============================================================ */}
 
         {/* ============================ */}
         {/* 核心技術說明網格區塊 (原始 HTML 結構) 開始 */}
@@ -470,24 +477,24 @@ flowchart TD
 
         {/* 1. 當 activeVersion 為 0 時，渲染 V1.0 的技術說明網格 */}
         {activeVersion === 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 animate-fade-in">
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-blue-500">
-              <h3 className="text-xl font-bold mb-2">LINE Bot API</h3>
+              <h3 className="text-xl font-bold mb-2">1. LINE Bot API</h3>
               <p className="text-gray-600 text-sm leading-relaxed">處理使用者的圖文訊息，並透過 Webhook 將事件安全地轉發至內部網路。</p>
             </div>
 
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-green-500">
-              <h3 className="text-xl font-bold mb-2">IIS 伺服器 (C#)</h3>
+              <h3 className="text-xl font-bold mb-2">2. IIS 伺服器 (C#)</h3>
               <p className="text-gray-600 text-sm leading-relaxed">作為企業防火牆內的前線接收端，進行基礎的流量過濾與格式轉換。</p>
             </div>
 
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-purple-500">
-              <h3 className="text-xl font-bold mb-2">多執行緒緩衝 (Threading)</h3>
+              <h3 className="text-xl font-bold mb-2">3. 多執行緒緩衝 (Threading)</h3>
               <p className="text-gray-600 text-sm leading-relaxed">針對 LINE 使用者常有的「碎語」習慣，實作 5~10 秒的延遲收容機制，避免頻繁觸發 AI。</p>
             </div>
 
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-orange-500">
-              <h3 className="text-xl font-bold mb-2">狀態機管理</h3>
+              <h3 className="text-xl font-bold mb-2">4. 狀態機管理</h3>
               <p className="text-gray-600 text-sm leading-relaxed">結合正則表達式 (Regex)，實作「AI 自動服務」、「等待統編」與「真人接手」等多重狀態切換。</p>
             </div>
           </div>
@@ -495,29 +502,29 @@ flowchart TD
 
         {/* 2. 當 activeVersion 為 1 時，渲染 V2.0 的技術說明網格 */}
         {activeVersion === 1 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 animate-fade-in">
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-blue-500">
-              <h3 className="text-xl font-bold mb-2">前端介面 (React + Vite)</h3>
+              <h3 className="text-xl font-bold mb-2">1. 前端介面 (React + Vite)</h3>
               <p className="text-gray-600 text-sm leading-relaxed">負責處理使用者輸入、狀態管理 (State) 與條件渲染 (Conditional Rendering)，並使用 Tailwind 實現完美 RWD。</p>
             </div>
 
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-green-500">
-              <h3 className="text-xl font-bold mb-2">網路穿透 (Ngrok)</h3>
+              <h3 className="text-xl font-bold mb-2">2. 網路穿透 (Ngrok)</h3>
               <p className="text-gray-600 text-sm leading-relaxed">作為安全的 API Gateway，將外部的 HTTPS 請求精準路由至本地端的 Python 服務伺服器。</p>
             </div>
 
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-purple-500">
-              <h3 className="text-xl font-bold mb-2">後端邏輯 (Python)</h3>
+              <h3 className="text-xl font-bold mb-2">3. 後端邏輯 (Python)</h3>
               <p className="text-gray-600 text-sm leading-relaxed">處理 API 路由與跨域請求 (CORS)，並負責將資料整理後對接底層的 AI 模型。</p>
             </div>
 
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-orange-500">
-              <h3 className="text-xl font-bold mb-2">大型語言模型 (Ollama)</h3>
+              <h3 className="text-xl font-bold mb-2">4. 大型語言模型 (Ollama)</h3>
               <p className="text-gray-600 text-sm leading-relaxed">本地端運行的 AI 引擎，提供低延遲、高隱私的自然語言生成服務。</p>
             </div>
 
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-yellow-500">
-              <h3 className="text-xl font-bold mb-2">向量檢索 (ChromaDB 雙軌 RAG)</h3>
+              <h3 className="text-xl font-bold mb-2">5. 向量檢索 (ChromaDB 雙軌 RAG)</h3>
               <p className="text-gray-600 text-sm leading-relaxed">實作高精準 (A軌) 與自動擴展 (B軌) 的雙軌檢索機制，透過 Cosine Similarity 嚴謹比對，大幅降低大型語言模型的幻覺 (Hallucination)。</p>
             </div>
           </div>
@@ -525,7 +532,7 @@ flowchart TD
 
         {/* 3. 當 activeVersion 為 2 時，渲染 V3.0 的技術說明網格 */}
         {activeVersion === 2 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 animate-fade-in">
             {/* 模組 1：CI/CD 與極速交付 */}
             <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-indigo-500">
               <h3 className="text-xl font-bold mb-2">1. CI/CD 自動化建置與 Docker 交付</h3>
