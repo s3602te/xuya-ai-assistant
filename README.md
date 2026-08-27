@@ -12,7 +12,7 @@
 
 ---
 
-## 十大核心技術亮點
+## 核心技術
 
 * **1. CI/CD 自動化建置與 Docker 交付：** 建立 GitHub Actions 自動化流水線，程式碼 Push 即自動編譯 React 前端並注入 Flask 後端封裝為 Docker 映像檔推至 Docker Hub；透過 Docker Compose 設定資料持久化（Volume 掛載）與容器網路橋接（`host.docker.internal` 穿透至宿主機 Ollama），實現目標主機一鍵極速部署。
 * **2. WebSocket 即時通訊與多執行緒訊息水桶：** 針對使用者「碎語」連續輸入痛點，實作 5~10 秒滑動視窗緩衝機制，防止高頻併發請求擊垮 AI；透過 WebSocket 實現雙向非同步推播，並內建「真人客服接管」狀態機與閒置計時重置機制。
