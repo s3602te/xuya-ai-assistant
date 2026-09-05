@@ -111,7 +111,7 @@ def process_actual_logic(conv_key):
 
 
     # 3. 客戶主動請求重啟 AI：清除所有轉接與鎖定狀態，寫入通知並廣播前端切換為 AI 模式
-    if any(re.search(p, user_message, re.IGNORECASE) for p in AI_RESTART_PATTERNS_FROM_CLIENT) or user_message == "取消轉接重啟AI":
+    if any(re.search(p, user_message, re.IGNORECASE) for p in AI_RESTART_PATTERNS_FROM_CLIENT) or user_message == "取消轉接重啟AI" or "問題已解決" in user_message:
         human_handoff[conv_key] = False
         handoff_pending.pop(conv_key, None)
         handoff_pending_times.pop(conv_key, None)

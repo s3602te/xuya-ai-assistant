@@ -143,6 +143,13 @@ class AgentState(TypedDict):
     rag_hit_type: str
     all_steps_done: bool
     plan_decision: str
+    # 【SA v4.3 新增】search_notes -> 開放式資訊查詢(新聞、時事、一般話題)的原始搜尋摘要清單。
+    # 跟 facts 分開存放的原因：facts 是「單一可驗證數值」帳本(508 公尺、56…)，
+    # 下游有嚴格的數字溯源檢查；但「昨天台灣的新聞」這種問題根本沒有單一數值可萃取，
+    # 硬塞進 facts 只會逼萃取器捏造一個假數字出來(見 search_node 的說明)。
+    # search_notes 專門放這種「一段文字摘要」，Final_Answer 會直接引用去統整答案，
+    # 不會被數字溯源檢查誤判成編造。
+    search_notes: List[str]
 
 
 # ==========================================
@@ -572,6 +579,50 @@ _NEEDS_EXTERNAL_FACT = (
 # 保留給第三層啟發式拆解使用（雙實體比較題），與純數學判斷無關
 _MATH_HINT = r'(計算|算出|相差|差多少|高多少|多多少|少多少|誰比誰|總共|合計|幾倍|百分比|平均|加起來|總和|平分|分給|每人|一人可以|一個人可以)'
 
+# 【SA v4.1 新增】明確的「要求上網」訊號 —— 修正 RAG 誤判蓋過使用者明確指令的 bug。
+#
+# 問題起因：planner_node 一開始就檢查 rag_hit_type == "manual"，
+# 只要向量檢索覺得夠像知識庫裡的面試問答，就直接空清單結案，
+# 完全沒有機會看到使用者這句話裡其實白紙黑字寫著「幫我上網搜尋」。
+# 「昨天台灣的新聞」在向量空間上跟「柬埔寨專案」意外地近（0.528，低於救援門檻），
+# 於是被邊界救援規則撈走，使用者明確的上網指令就這樣被蓋掉了。
+#
+# 這份清單刻意比 _NEEDS_EXTERNAL_FACT 窄很多、只挑「動詞是叫你去查」的強訊號
+# （上網、搜尋、查詢、google…），不含「新聞、股價、天氣」這類名詞，
+# 因為名詞可能只是問題內容的一部分（例如面試題「你對最新的 AI 趨勢有什麼看法」），
+# 不代表使用者一定要工具去查即時資料；但「幫我上網查」這種動詞片語幾乎不會誤判。
+_EXPLICIT_SEARCH_INTENT = r'(上網|網路搜尋|搜尋一下|幫我搜尋|查詢|查一下|幫我查|估狗|google)'
+
+# 【SA v4.2 新增】把「幫我上網搜尋」這類指令性贅字從問題裡剝掉，只留下真正要查的主題，
+# 這樣送進 search_web 的關鍵字才乾淨（不然 Brave 會拿「幫我上網搜尋昨天台灣的新聞」
+# 整句去查，準確度比純關鍵字「昨天台灣的新聞」差）。
+_SEARCH_TRIGGER_STRIP = re.compile(
+    r'(可以幫我|請幫我|幫我|請你|請|可以|麻煩你|麻煩|上網幫我|上網搜尋|網路搜尋|搜尋一下|'
+    r'幫我搜尋|搜尋|查詢一下|查一下|幫我查|查詢|估狗|google|一下|嗎|呢|喔|唷|？|\?|。)',
+    re.IGNORECASE,
+)
+
+
+def _strip_search_trigger_words(question: str) -> str:
+    core = _SEARCH_TRIGGER_STRIP.sub('', question or '').strip()
+    return core if core else (question or '').strip()
+
+
+# 【SA v4.3 新增】判斷一個搜尋目標是不是「單一可驗證數值」查詢(高度、股價、人口…)，
+# 還是「開放式資訊」查詢(新聞、時事、某人對某議題的看法…)。
+# 只有前者才適合走 ExtractedFact 數值萃取器；後者硬萃取只會逼小模型捏造假數字
+# (實測案例：「昨天台灣的新聞」被萃取成「12.5個基」，是搜尋結果裡一句無關的
+# 「央行升息半碼(12.5個基點)」被錯誤當成答案抓出來)。
+_SINGLE_FACT_ATTRS = re.compile(
+    r'(高度|海拔|面積|人口|身高|體重|年齡|歲數|股價|股票|市值|營收|資本額|'
+    r'匯率|利率|油價|房價|多少人|多少錢|幾層|幾公里|幾公尺|排名|第幾名|冠軍|'
+    r'是誰|誰是|哪一年|哪一天|成立於|創立於|創立時間|成立時間)'
+)
+
+
+def _is_single_fact_target(target: str) -> bool:
+    return bool(_SINGLE_FACT_ATTRS.search(target or ''))
+
 
 def _strip_lead(s: str) -> str:
     s = s.strip()
@@ -681,20 +732,51 @@ def planner_node(state: AgentState):
         "math_calls": 0,
         "all_steps_done": True,
         "plan_decision": "undetermined",
+        "search_notes": [],
     }
 
-    # ---- 前置判斷：知識庫已有標準答案，就不要上網 ----
-    if rag_hit_type == "manual":
-        print("\n[規劃官聖騎士 Planner] 🎯 RAG 高精準區已命中標準答案，本輪不需要上網查詢，直接結案。")
-        return {**base_return, "plan": [], "plan_decision": "no_tools_needed"}
+    # ---- 【SA v4.2 新增】最優先前置攔截：使用者明確要求上網 → 不靠模型判斷，直接排 search ----
+    #
+    # v4.1 原本只是「manual 命中時不要短路，讓題目繼續走三層拆解」，但實測發現
+    # 就算不短路，交給模型的第一層（結構化拆解）判斷後仍然吐出空清單：
+    #
+    #   [規劃官聖騎士 Planner] ⚠️ ...含明確上網訊號，不短路，繼續交給規劃官判斷。
+    #   [規劃官聖騎士 Planner] 📋 (第一層) 判定本題不需要任何工具(空清單)
+    #
+    # 原因：第一層系統提示的判斷準則第 1 條只講「你不確定的具體事實數字」
+    # （高度、人口、股價…），範例也只示範「查兩棟建築高度」這種數字題。
+    # 「幫我上網搜尋昨天台灣的新聞」不含這類數字，8B 小模型套不進這條規則，
+    # 又符合第 5 條「問公司介紹/服務內容可回傳空清單」的模糊邊界，於是誤判成不需要工具。
+    #
+    # 跟純數學題的處理邏輯一樣（見下方 _is_self_contained_math）：與其繼續
+    # 加強提示詞去說服一顆小模型，不如把「使用者已經明講要上網」這件事
+    # 直接寫死成規則，程式碼凌駕於 LLM 判斷 —— 這是本專案一路以來的設計原則。
+    # 一旦句子裡出現明確的上網／搜尋／查詢動詞，一律不經模型、直接排一個 search 步驟，
+    # 查詢關鍵字用 _strip_search_trigger_words() 把「幫我」「上網」這些贅字剝掉，
+    # 只留下真正的查詢主題（例如「昨天台灣的新聞」），零 API、零模型判斷。
+    if re.search(_EXPLICIT_SEARCH_INTENT, question):
+        search_query = _strip_search_trigger_words(question)
+        search_plan = _build_plan([("search", search_query)])
+        print(f"\n[規劃官聖騎士 Planner] 🌐 前置判定：使用者明確要求上網查詢 → 直接排 search 步驟（零 API、零模型判斷），查詢詞：「{search_query}」")
+        print(_render_plan(search_plan))
+        return {**base_return, "plan": search_plan, "plan_decision": "has_plan"}
 
-    # ---- 【SA v3.2 新增】前置攔截：自足的數學題根本不必問模型 ----
+    # ---- 【SA v4.3 修正】前置攔截：自足的數學題根本不必問模型（順序提前到 RAG 短路之前）----
     #
-    # 這一步刻意放在【呼叫 LLM 之前】，理由就是你說的：程式碼凌駕於 LLM 判斷。
-    # 只要題目裡的數字已經夠算、又沒有任何需要上網的訊號，
-    # 那「要不要搜尋」這件事根本沒有討論空間，不需要讓模型有機會答錯。
+    # 這一步刻意放在【呼叫 LLM 之前】，也刻意放在【RAG manual 短路判斷之前】。
     #
-    # 實測慘案（全部發生在讓模型自己判斷的時候）：
+    # 血淋淋的實測翻車：「某公司技術部門有8位工程師...從技術部選出3人、
+    # 從行銷部選出2人，總共有多少種選法？」這種純數學題，向量檢索意外跟知識庫裡
+    # 「工作經歷」主題的面試問答很接近(距離 0.403，還低於精準門檻，是真命中不是邊界救援)，
+    # 於是被舊版的 RAG manual 短路判斷攔截，整題交給小模型憑印象亂答，
+    # 完全沒進算盤法師，答案對不對純粹看運氣。
+    #
+    # 這跟原本只保護「明確上網意圖」的 v4.2 是同一種病：向量相似度是模糊分數，
+    # 不該凌駕在「題目本身就是可以百分之百確定的自足數學題」這種決定性判斷之上。
+    # 所以把這一段搬到 RAG manual 短路的前面 —— 只要題目自帶所有數字、
+    # 又沒有任何需要外部資料的訊號，就不計較 RAG 弓箭手撈到了什麼，直接交給算盤法師。
+    #
+    # 其他實測慘案（同樣是讓模型自己判斷才會發生）：
     #   「10片披薩分4個人」  → 規劃官吐出 search:4 / search:10，網路戰士真的去 Google「4」
     #   「大魚70條小魚30條」 → 拆出 search:大魚總數，搜到「一午二紅沙」這句台灣俗諺
     # 這些題目的數字全部寫在題幹裡，一次 API 都不該打。
@@ -703,6 +785,14 @@ def planner_node(state: AgentState):
         print("\n[規劃官聖騎士 Planner] 🧮 前置判定：題目自帶所有數字、且無需外部資料 → 純數學題，直接交給算盤法師（零 API、零模型判斷）")
         print(_render_plan(math_plan))
         return {**base_return, "plan": math_plan, "plan_decision": "has_plan"}
+
+    # ---- 前置判斷：知識庫已有標準答案，就不要上網 ----
+    # 【SA v4.1】：manual 命中（含邊界救援誤判）且使用者沒有明確上網指令、也不是自足數學題時，才短路結案。
+    # 上面兩段 v4.2／v4.3 攔截已經先處理掉「有明確上網指令」與「自足數學題」這兩種決定性情況，
+    # 所以這裡的 RAG 短路只會作用在真正的知識庫問答題上，能安全短路。
+    if rag_hit_type == "manual":
+        print("\n[規劃官聖騎士 Planner] 🎯 RAG 高精準區已命中標準答案，本輪不需要上網查詢，直接結案。")
+        return {**base_return, "plan": [], "plan_decision": "no_tools_needed"}
 
     # ---- 保底鏈第一層：巢狀結構化輸出 ----
     # 【SA v2.2】：layer1_ok / layer2_ok 記錄的是「這一層有沒有成功回傳」，
@@ -1052,48 +1142,87 @@ def search_node(state: AgentState):
         unique_numbers = list(dict.fromkeys(annotated_numbers))
         raw = f"【已換算好的明確數字，請優先使用】：{('、'.join(unique_numbers))}\n\n" + raw
 
-    # ---- 【SA v2 核心】：數值萃取 → 登錄事實帳本 ----
     fact_target = step["target"] if step is not None else final_query
-    extracted_value = ""
-    try:
-        fact_extractor = verify_llm.with_structured_output(ExtractedFact)
-        fact_sys = SystemMessage(content=(
-            "你是數值萃取員。請【只】從下方搜尋結果的文字中，找出使用者要的那一個數值。\n"
-            f"要找的目標是：{fact_target}\n\n"
-            "規則：\n"
-            "1. 只能使用搜尋結果裡真正出現的數字，【絕對禁止】使用你自己記憶中的數字。\n"
-            "2. 找到請填 found=true，並在 value 填上『數字 + 單位』(例如 '508 公尺')。\n"
-            "3. 搜尋結果裡如果沒有明確數字，請誠實填 found=false，value 留空。\n"
-            "4. 不要輸出任何解釋文字。"
-        ))
-        fact_res = fact_extractor.invoke([fact_sys, HumanMessage(content=raw[:2500])])
-        if fact_res.found and (fact_res.value or "").strip():
-            extracted_value = fact_res.value.strip()
-    except Exception as e:
-        print(f"[網路戰士 Search_Agent] ⚠️ 數值萃取器異常({e})，改為保留原始摘要交給下游判讀。")
-
     excerpt = raw[:800]
 
-    if extracted_value:
-        facts[fact_target] = extracted_value
-        if step is not None:
-            step["status"] = "done"
-            step["result"] = extracted_value
-        print(f"[網路戰士 Search_Agent] 📒 已登錄事實帳本：{fact_target} ＝ {extracted_value}")
-        content = (
-            f"{STATUS_OK}\n"
-            f"【搜尋關鍵字：{final_query}】\n"
-            f"【已確認事實】{fact_target} ＝ {extracted_value}\n"
-            f"【原始摘要(節錄)】\n{excerpt}"
-        )
-    else:
-        print(f"[網路戰士 Search_Agent] ⚠️ 搜尋有結果，但未能萃取出「{fact_target}」的明確數值。")
-        content = (
-            f"{STATUS_FAIL}\n"
-            f"【搜尋關鍵字：{final_query}】\n"
-            f"【問題】搜尋有回應，但結果中找不到「{fact_target}」的明確數值。\n"
-            f"【原始摘要(節錄)】\n{excerpt}"
-        )
+    # ---- 【SA v4.3 新增】分流：這是「單一可驗證數值」查詢，還是「開放式資訊」查詢？ ----
+    #
+    # 血淋淋的實測翻車（新聞題）：問「昨天台灣的新聞」，下面的 ExtractedFact 萃取器
+    # 被逼著一定要從搜尋結果裡「找出一個數值」，結果從一段完全無關的
+    # 「央行升息半碼(12.5個基點)」新聞片段裡硬抓了「12.5」出來，
+    # 登錄成「昨天台灣的新聞 ＝ 12.5個基」這種語意不通的假事實，
+    # 最後還被 Final_Answer 的確定性模板原封不動印給使用者看。
+    #
+    # 根因是這整條「數值萃取 → 事實帳本 → 數字溯源檢查」的管線，
+    # 從設計上就只適合「有單一正確答案的事實題」(建築高度、股價、人口…)，
+    # 對「新聞、話題、看法」這種開放式資訊完全文不對題。
+    #
+    # 解法：先用 _is_single_fact_target() 判斷這次查的到底是不是「量化屬性」，
+    # 是，才進數值萃取這條管線；不是，就直接把原始搜尋摘要存進 search_notes，
+    # 交給 Final_Answer 自己統整成一段文字回覆，不勉強蒸餾成一個數字。
+    if _is_single_fact_target(fact_target):
+        # ---- 【SA v2 核心】：數值萃取 → 登錄事實帳本 ----
+        extracted_value = ""
+        try:
+            fact_extractor = verify_llm.with_structured_output(ExtractedFact)
+            fact_sys = SystemMessage(content=(
+                "你是數值萃取員。請【只】從下方搜尋結果的文字中，找出使用者要的那一個數值。\n"
+                f"要找的目標是：{fact_target}\n\n"
+                "規則：\n"
+                "1. 只能使用搜尋結果裡真正出現的數字，【絕對禁止】使用你自己記憶中的數字。\n"
+                "2. 找到請填 found=true，並在 value 填上『數字 + 單位』(例如 '508 公尺')。\n"
+                "3. 搜尋結果裡如果沒有明確數字，請誠實填 found=false，value 留空。\n"
+                "4. 不要輸出任何解釋文字。"
+            ))
+            fact_res = fact_extractor.invoke([fact_sys, HumanMessage(content=raw[:2500])])
+            if fact_res.found and (fact_res.value or "").strip():
+                extracted_value = fact_res.value.strip()
+        except Exception as e:
+            print(f"[網路戰士 Search_Agent] ⚠️ 數值萃取器異常({e})，改為保留原始摘要交給下游判讀。")
+
+        if extracted_value:
+            facts[fact_target] = extracted_value
+            if step is not None:
+                step["status"] = "done"
+                step["result"] = extracted_value
+            print(f"[網路戰士 Search_Agent] 📒 已登錄事實帳本：{fact_target} ＝ {extracted_value}")
+            content = (
+                f"{STATUS_OK}\n"
+                f"【搜尋關鍵字：{final_query}】\n"
+                f"【已確認事實】{fact_target} ＝ {extracted_value}\n"
+                f"【原始摘要(節錄)】\n{excerpt}"
+            )
+        else:
+            print(f"[網路戰士 Search_Agent] ⚠️ 搜尋有結果，但未能萃取出「{fact_target}」的明確數值。")
+            content = (
+                f"{STATUS_FAIL}\n"
+                f"【搜尋關鍵字：{final_query}】\n"
+                f"【問題】搜尋有回應，但結果中找不到「{fact_target}」的明確數值。\n"
+                f"【原始摘要(節錄)】\n{excerpt}"
+            )
+
+        return {
+            "messages": [AIMessage(name="Search_Agent", content=content)],
+            "plan": plan,
+            "facts": facts,
+            "searched_queries": searched,
+            "retry_count": retry_count,
+            "search_calls": search_calls
+        }
+
+    # ---- 開放式資訊查詢：不萃取數值，直接把原始搜尋摘要存進 search_notes ----
+    search_notes = list(state.get("search_notes", []) or [])
+    search_notes.append(f"【查詢主題：{fact_target}】\n{excerpt}")
+    if step is not None:
+        step["status"] = "done"
+        step["result"] = f"（已取得搜尋摘要，共 {len(excerpt)} 字，詳見 search_notes）"
+    print(f"[網路戰士 Search_Agent] 📝 這是開放式資訊查詢，不勉強萃取單一數值，直接保留搜尋摘要（{len(excerpt)} 字）供 Final_Answer 統整。")
+    content = (
+        f"{STATUS_OK}\n"
+        f"【搜尋關鍵字：{final_query}】\n"
+        f"【這是開放式資訊查詢，摘要已保留供最終回覆整理引用】\n"
+        f"【原始摘要(節錄)】\n{excerpt}"
+    )
 
     return {
         "messages": [AIMessage(name="Search_Agent", content=content)],
@@ -1101,7 +1230,8 @@ def search_node(state: AgentState):
         "facts": facts,
         "searched_queries": searched,
         "retry_count": retry_count,
-        "search_calls": search_calls
+        "search_calls": search_calls,
+        "search_notes": search_notes,
     }
 
 
@@ -1291,6 +1421,21 @@ def math_node(state: AgentState):
         return e
 
     expr = _trim_to_math(expr)
+
+    # 【SA v4.4 新增】記法正規化 —— 把模型自己習慣的數學課本記法改寫成白名單認得的函式名。
+    #
+    # 實測翻車（8選3、6選2 選法題）：提示詞從頭到尾只教過 comb(n,k)，
+    # 模型卻自己選擇更熟悉的課本寫法 C(8,3) * C(6,2)。這不是模型「看不懂題目」，
+    # 是它輸出習慣跟指令不一致；語法檢查的白名單只認 comb/perm/factorial，
+    # "C" 不在清單裡，於是連續三次判定為非法字元，整題失敗轉真人。
+    #
+    # 與其繼續在提示詞裡加字去說服模型「請用 comb」(已經加過一次了，這次還是沒用)，
+    # 不如把「模型很可能會用的同義記法」直接正規化掉 —— 這跟數值萃取那次的教訓一樣：
+    # 程式碼負責把輸入攤平成白名單認得的形式，不要期待小模型每次都乖乖照抄指令格式。
+    # 只處理最常見的兩種課本記法：C(n,k) 組合數、P(n,k) 排列數。
+    # 用 \b 避免誤傷 comb/perm 內部字母(例如 perm 開頭沒有裸 P 後面接括號的情況)。
+    expr = re.sub(r'\bC\s*\(', 'comb(', expr)
+    expr = re.sub(r'\bP\s*\(', 'perm(', expr)
 
     # ---- 【SA v4.0】鏈式推導：多行腳本優先走 calculate_script ----
     #
@@ -1612,9 +1757,9 @@ def _clean_internal_terms(raw_text: str) -> str:
     return clean_text.strip()
 
 
-def _answer_numbers_traceable(answer: str, facts: dict, question: str):
+def _answer_numbers_traceable(answer: str, facts: dict, question: str, search_notes=None):
     """
-    【SA v4.1 新增】輸出層的數字溯源檢查 —— 第五道不變條件。
+    【SA v4.1 新增，v4.3 擴充】輸出層的數字溯源檢查 —— 第五道不變條件。
 
     為什麼需要這道？因為前四道不變條件全部作用在【算盤法師】身上，
     盜賊客服在寫最終回覆時，完全沒有程式碼在監督它有沒有亂編數字，
@@ -1628,12 +1773,19 @@ def _answer_numbers_traceable(answer: str, facts: dict, question: str):
 
     這是最危險的錯誤類型：log 全綠、鑑定士放行，但使用者拿到假答案。
 
+    【SA v4.3】：search_notes 是開放式資訊查詢(新聞…)保留的原始搜尋摘要，
+    這些文字裡本來就會出現大量日期、金額等數字，是合法引用來源，
+    不該被當成「編造」，所以也要納入 allowed 集合，否則新聞摘要題
+    會被這道檢查誤判、一路退到確定性模板，重演本次翻車。
+
     回傳 (是否全部可溯源, 無法溯源的數字集合)
     """
     allowed = set()
     for k, v in facts.items():
         allowed |= _numbers_in(str(k))
         allowed |= _numbers_in(str(v))
+    for note in (search_notes or []):
+        allowed |= _numbers_in(str(note))
     allowed |= _numbers_in(question)
     # 【SA v4.1】：把題目數字之間的「常見中間結果」也算成合法來源。
     # 例如寶石題「32 顆 + 25 顆混在一起」，回覆講「共 57 顆」是完全正確的推理，
@@ -1656,11 +1808,13 @@ def _answer_numbers_traceable(answer: str, facts: dict, question: str):
     return (not unknown), unknown
 
 
-def _render_allowed_numbers(facts: dict, question: str) -> str:
+def _render_allowed_numbers(facts: dict, question: str, search_notes=None) -> str:
     """把「這一題可以使用的數字」整理成一行，供重寫時明確告知模型。"""
     allowed = set()
     for k, v in facts.items():
         allowed |= _numbers_in(str(v))
+    for note in (search_notes or []):
+        allowed |= _numbers_in(str(note))
     allowed |= _numbers_in(question)
     return "、".join(sorted(allowed, key=lambda x: (len(x), x))) or "（沒有任何可用數字）"
 
@@ -1674,6 +1828,7 @@ def final_answer_node(state: AgentState):
     facts = dict(state.get("facts", {}) or {})
     rag_context = state.get("rag_context", "") or ""
     rag_hit_type = state.get("rag_hit_type", "none")
+    search_notes = list(state.get("search_notes", []) or [])
 
     current_question = ""
     for msg in msgs:
@@ -1807,7 +1962,7 @@ def final_answer_node(state: AgentState):
     #   90% 的題目是「RAG 命中 → 照著標準答案講」，這種只需要極簡提示，
     #   完全不需要計算警告、任務清單、調查紀錄那一整套。
     #   只有真的動用了搜尋／計算工具時，才需要完整版。
-    used_tools = bool(plan) or bool(facts)
+    used_tools = bool(plan) or bool(facts) or bool(search_notes)
 
     if rag_hit_type == "manual" and not used_tools:
         # ---------- 極簡版：知識庫命中，照著講就好 ----------
@@ -1848,6 +2003,18 @@ def final_answer_node(state: AgentState):
         }
 
     # ---------- 完整版：有動用搜尋／計算工具時才用 ----------
+    # 【SA v4.3 新增】開放式搜尋摘要區塊 —— 跟 facts(單一數值帳本) 分開顯示，
+    # 避免模型把「新聞摘要」誤認成「查證數字」硬套進鐵則 4 的計算邏輯。
+    if search_notes:
+        search_notes_block = (
+            "【本次搜尋到的原始資料 ── 這是一般性資訊(例如新聞)，"
+            "請你自己統整成一段自然的白話摘要回答使用者，"
+            "只能講這份資料裡確實提到的內容，不要延伸、不要補充資料外的具體數字、"
+            "人名、事件】：\n" + "\n\n".join(search_notes)[:1800]
+        )
+    else:
+        search_notes_block = "【本次搜尋到的原始資料】：（本輪沒有這類開放式搜尋資料）"
+
     sys_msg = SystemMessage(content=(
         # 【SA v2.6 重大修正】：這裡原本寫「你是一位專業的 AI 助理。」
         #
@@ -1865,6 +2032,7 @@ def final_answer_node(state: AgentState):
         f"【目前使用者的問題】：\n{current_question}\n\n"
         f"{rag_block}\n\n"
         f"【本次查證到的資料 ── 這是你唯一可以引用的『外部查詢數字』來源】：\n{_render_facts(facts)}\n\n"
+        f"{search_notes_block}\n\n"
         f"【本輪任務完成情況】：\n{gap_note}\n\n"
         f"【本輪調查過程紀錄(佐證用)】：\n{scratch_str}\n\n"
         f"【上一輪聊了什麼，只用來判斷本題是否延續前文，不是要你複述】：\n{history_str}\n\n"
@@ -1880,7 +2048,8 @@ def final_answer_node(state: AgentState):
         "那段話只在使用者【第一次】問你是誰、或請你自我介紹時才需要講。\n"
         "【鐵則 2】：只有當本題明顯是延續上一題時（例如上一題問專案、這題問『那個專案多久』），"
         "才需要參考上一輪聊了什麼；否則完全忽略歷史，直接回答當前問題。\n"
-        "【鐵則 3】：你只能使用【公司知識庫】或【本次查證到的資料】裡明確出現的數字與名稱作答，"
+        "【鐵則 3】：你只能使用【公司知識庫】【本次查證到的資料】或【本次搜尋到的原始資料】裡"
+        "明確出現的數字與名稱作答，"
         "絕對不准使用你自己記憶中的人名、年份、數字！查無資料就誠實說查詢失敗，絕不編造。\n"
         "【鐵則 4 ── 最重要，絕無例外】：你【完全不會算數】。"
         "如果使用者問的是差值、總和、比例、倍數，而【查證資料裡沒有現成的計算結果】，"
@@ -1908,21 +2077,24 @@ def final_answer_node(state: AgentState):
 
     clean_text = _clean_internal_terms(response.content)
 
-    # 【SA v4.1】：輸出層數字溯源 —— 發現編造就給一次重寫機會。
+    # 【SA v4.1 新增，v4.3 擴充】：輸出層數字溯源 —— 發現編造就給一次重寫機會。
     #
     # 只在「有動用工具」的路徑做這道檢查，因為這時候才有明確的數字來源可以比對。
     # 純知識問答（履歷題）不做，那類回答本來就會出現知識庫裡的各種年份與數量。
-    if facts:
-        ok, unknown = _answer_numbers_traceable(clean_text, facts, current_question)
+    # 【v4.3】：search_notes(開放式搜尋摘要，如新聞) 也納入檢查範圍 ——
+    # 一樣要防止模型在整理摘要時，把摘要裡沒有的數字自己編出來。
+    if facts or search_notes:
+        ok, unknown = _answer_numbers_traceable(clean_text, facts, current_question, search_notes)
         if not ok:
             bad = "、".join(sorted(unknown))
             print(f"[盜賊客服 Final_Answer] 🚨 偵測到回覆中有無法溯源的數字：{bad}，要求重寫一次。")
             retry_msg = SystemMessage(content=(
                 "你是張序亞（Steven）的面試 AI 助理。\n\n"
                 f"面試官的問題：{current_question}\n\n"
-                f"【這一題唯一可以使用的數字】：{_render_allowed_numbers(facts, current_question)}\n\n"
+                f"【這一題唯一可以使用的數字】：{_render_allowed_numbers(facts, current_question, search_notes)}\n\n"
                 f"【已經算出來的結果】：\n{_render_facts(facts)}\n\n"
-                f"⚠️ 你上一次的回覆出現了 {bad} 這些數字，"
+                + (f"【搜尋摘要原文，只能引用裡面出現過的內容】：\n" + "\n\n".join(search_notes)[:1800] + "\n\n" if search_notes else "")
+                + f"⚠️ 你上一次的回覆出現了 {bad} 這些數字，"
                 "它們【不在】上面的結果裡，是你自己編的。\n\n"
                 "請重寫一次回覆。硬性規定：\n"
                 "1. 只能使用上面列出的數字，一個都不准多。\n"
@@ -1934,18 +2106,33 @@ def final_answer_node(state: AgentState):
             ))
             response2 = invoke_with_timeout(main_llm, [retry_msg])
             clean_text2 = _clean_internal_terms(response2.content)
-            ok2, unknown2 = _answer_numbers_traceable(clean_text2, facts, current_question)
+            ok2, unknown2 = _answer_numbers_traceable(clean_text2, facts, current_question, search_notes)
             if ok2:
                 print("[盜賊客服 Final_Answer] ✅ 重寫後所有數字都可溯源。")
                 clean_text = clean_text2
-            else:
+            elif facts:
                 # 【SA v4.1】重寫還是編 → 不再讓模型自由發揮，直接用確定性模板輸出。
                 # 寧可講得像機器人，也不要給面試官一個看起來很順但數字是假的答案。
+                # 這個模板只適用於「有 facts(單一數值)」的情況，因為它就是把 facts 逐條印出來。
                 print(f"[盜賊客服 Final_Answer] 🛑 重寫後仍有編造數字（{'、'.join(sorted(unknown2))}），改用確定性模板輸出。")
                 clean_text = (
                     f"{current_question}\n\n"
                     "計算結果如下：\n"
                     + "\n".join(f"・{k} ＝ {v}" for k, v in facts.items())
+                )
+            else:
+                # 【SA v4.3 新增】：純開放式搜尋(沒有 facts、只有 search_notes)的確定性後備方案。
+                # facts 是空的，上面那個「計算結果如下」模板完全不適用(印出來會是空清單)，
+                # 這也是這次「12.5個基」事故的直接肇因 —— 舊版沒有這個分支，
+                # 空 facts 也硬套進同一個模板，於是使用者收到的訊息看起來像沒填完的表格。
+                # 這裡改成：老實告訴使用者摘要沒能完全整理乾淨，附上搜尋到的原始重點，
+                # 讓使用者自己判斷，而不是用一個編造或空洞的句子交差。
+                print(f"[盜賊客服 Final_Answer] 🛑 重寫後仍有編造數字（{'、'.join(sorted(unknown2))}），且本題無 facts、改用原始搜尋摘要後備輸出。")
+                first_note = search_notes[0] if search_notes else "（沒有可用的搜尋摘要）"
+                clean_text = (
+                    f"{current_question}\n\n"
+                    "我整理摘要時抓不準確切數字，直接附上搜尋到的原始重點給你參考：\n\n"
+                    + first_note[:600]
                 )
 
     return {
@@ -2039,6 +2226,7 @@ if __name__ == "__main__":
             "rag_hit_type": "none",
             "all_steps_done": True,
             "plan_decision": "undetermined",
+            "search_notes": [],
         }
 
     q1 = "請幫我分別查詢台北 101 與日本東京晴空塔的建築總高度（公尺），並計算晴空塔和台北 101 誰比誰高多少公尺？"
