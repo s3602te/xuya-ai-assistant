@@ -323,9 +323,10 @@ def web_chat():
             row = conn.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
             title = row['title'] if row else "未命名對話"
 
-        # 5. 寫入資料庫：將使用者的提問先行存入 messages 資料表
-        conn.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", (session_id, 'user', user_message, current_time))
-        conn.commit()
+        # 5. 寫入資料庫：將使用者的提問先行存入 messages 資料表（排除取消轉接的系統隱藏指令）
+        if user_message != "取消轉接重啟AI":
+            conn.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", (session_id, 'user', user_message, current_time))
+            conn.commit()
         conn.close()
 
         # 6. 將資料送入核心大腦：把 session_id 與訊息傳入狀態機，處理緩衝機制，並確保後續 AI 的回覆可正確寫入
