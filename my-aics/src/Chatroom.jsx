@@ -365,6 +365,24 @@ function App() {
               break;
             }
           }
+          
+          // 4-5. 狀態重建 (3)：檢查最後一則訊息是否需要倒數計時，依據時間戳恢復進度條
+          if (processedMessages.length > 0) {
+            const lastMsg = processedMessages[processedMessages.length - 1];
+            if (lastMsg.role === 'ai' && lastMsg.created_at) {
+              const text = lastMsg.text;
+              const isCountdownNeeded = text.includes('是否轉接真人客服') || 
+                                        text.includes('請在 30 秒內輸入貴公司統編') || 
+                                        text.includes('已為您重新計時 30 秒');
+              if (isCountdownNeeded) {
+                const safeTime = new Date(lastMsg.created_at.replace(' ', 'T')).getTime();
+                const remain = Math.ceil((safeTime + 30000 - Date.now()) / 1000);
+                if (remain > 0 && remain <= 30) {
+                  setCountdown(remain);
+                }
+              }
+            }
+          }
 
           // 將推斷出來的狀態與訊息套用回畫面
           setIsHumanMode(restoredHumanMode)
@@ -809,7 +827,7 @@ function App() {
               )}
 
               {/* 10-3. TTS 朗讀與複製工具列 (僅針對非用戶訊息顯示) */}
-              {msg.role !== 'user' && (
+              {msg.role !== 'user' && !msg.text.includes('【系統通知】') && (
                 <div className="flex gap-3 mt-1 ml-2 text-xs text-gray-400 dark:text-gray-500">
                   <button onClick={() => handleSpeak(msg.text, index)} className="hover:text-blue-600 dark:hover:text-blue-400 transition flex items-center gap-1">
                     {speakingIndex === index ? (isPaused ? '▶️ 繼續' : '⏸️ 暫停') : '🔊 朗讀'}
