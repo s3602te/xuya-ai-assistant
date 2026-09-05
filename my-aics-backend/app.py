@@ -139,6 +139,7 @@ def admin_reply():
     # 1. 取得前端或 Postman 傳入的 JSON 負載資料
     data = request.json
     user_id = data.get("user_id")
+    session_id = data.get("session_id") # 接收前端指定的 session_id
     message = data.get("message")
     action = data.get("action", "reply") # reply: 傳送訊息, end_human: 結束真人模式
 
@@ -154,14 +155,17 @@ def admin_reply():
         conn = get_db_connection()
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 5. 查找該用戶最新的一筆對話 Session
-        session_row = conn.execute("SELECT id FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", (user_id,)).fetchone()
-        if session_row:
-            latest_session_id = session_row['id']
-            # 6. 將回覆訊息以 admin 角色存入 messages 資料表
-            conn.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", (latest_session_id, 'admin', message, current_time))
+        # 5. 優先使用指定的 session_id，若無則查找最新一筆
+        target_session_id = session_id
+        if not target_session_id:
+            session_row = conn.execute("SELECT id FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", (user_id,)).fetchone()
+            if session_row:
+                target_session_id = session_row['id']
+        
+        if target_session_id:
+        # 6. 將回覆訊息以 admin 角色存入 messages 資料表
+            conn.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", (target_session_id, 'admin', message, current_time))
             conn.commit()
-        conn.close()
 
         # 7. 優化核心：客服一旦回覆，立刻將閒置計時器歸零重新計算
         # 【SA v2.1 調整】：time 已改在檔案最上方 import，這裡不再重複 import
