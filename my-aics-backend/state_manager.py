@@ -102,6 +102,10 @@ def process_actual_logic(conv_key):
     if not user_message and user_image:
         user_message = "請幫我看看這張圖片，並說明內容或解決其中的問題。"
 
+    # 核心守門員：若無有效文字且無圖片，中斷流程不喚醒 AI
+    if not user_message and not user_image:
+        return
+
     # 因為新增計算mcp之後再看看要不要開啟
     ##############################################################################################################
     # 2. 財務防護網：比對是否包含帳務等敏感關鍵字，若有則直接阻擋並建議電話聯絡

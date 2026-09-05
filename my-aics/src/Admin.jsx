@@ -224,8 +224,8 @@ export default function Admin() {
   // 客服訊息傳送邏輯開始
   // ============================
   const handleAdminAction = async (actionType) => {
-    // 1. 空白防呆：若是回覆且無文字則拒絕執行
-    if (actionType === 'reply' && !inputText.trim()) return
+    // 1. 空白防呆：若是回覆且無文字則拒絕執行；若未選中對話也拒絕執行
+    if (actionType === 'reply' && (!inputText.trim() || !selectedSessionId)) return
 
     // 2. 按鈕鎖定：按下「結束真人」立刻鎖定並顯示「處理中...」
     if (actionType === 'end_human') {

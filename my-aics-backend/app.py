@@ -321,14 +321,14 @@ def rename_session(session_id):
 @app.route("/api/web_chat", methods=['POST'])
 def web_chat():
     # 1. 擷取前端 POST 發送的對話參數
-    data = request.json
+    data = request.json or {}
     session_id = data.get('session_id')
     user_message = data.get('message', '')
     user_id = data.get('user_id')
 
-    # 2. 執行空白防呆與缺漏檢查
-    if not user_message or not user_id:
-        return jsonify({"error": "缺少參數"}), 400
+    # 2. 執行空白防呆與缺漏檢查 (確保純空白字串直接擋下)
+    if not user_message or not str(user_message).strip() or not user_id:
+        return jsonify({"error": "提問內容缺少參數"}), 400
 
     try:
         conn = get_db_connection()
