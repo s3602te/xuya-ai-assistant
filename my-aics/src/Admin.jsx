@@ -234,7 +234,7 @@ export default function Admin() {
 
     const payload = {
       user_id: selectedUserId,
-      session_id: selectedSessionId, // 補上精確的對話 ID
+      session_id: selectedSessionId, // 補上精確的對話 ID 指定目前客服正在看哪一個房間
       message: inputText,
       action: actionType // 'reply' 或 'end_human'
     }

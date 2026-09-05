@@ -137,37 +137,54 @@ def admin_reply():
     你可以用 Postman 打這支 API，文字就會瞬間出現在前端網頁上！
     """
     # 1. 取得前端或 Postman 傳入的 JSON 負載資料
-    data = request.json
+    data = request.json or {}
     user_id = data.get("user_id")
-    session_id = data.get("session_id") # 接收前端指定的 session_id
-    message = data.get("message")
-    action = data.get("action", "reply") # reply: 傳送訊息, end_human: 結束真人模式
+    session_id = data.get("session_id")  # 接收前端指定的 session_id
+    message = data.get("message", "")
+    action = data.get("action", "reply")  # reply: 傳送訊息, end_human: 結束真人模式
 
     # 2. 參數防呆檢驗
     if not user_id:
         return jsonify({"error": "缺少 user_id"}), 400
 
+    # 【SA v4.5 修正】：這裡原本的 bug 是 target_session_id 在 reply 分支裡
+    # 「先被拿去 emit，後面才被賦值」，而 end_human 分支根本從頭到尾沒有定義它，
+    # 兩邊都會在執行到 socketio.emit(...) 那一行時直接拋出
+    # UnboundLocalError（區域變數被使用時尚未賦值），
+    # 導致 /api/admin_reply 每次呼叫都是 500，後台打字、結束真人兩個按鈕全部失效。
+    # 修法：把「決定 target_session_id」這件事提到最前面、兩個分支共用同一份邏輯，
+    # 確保它在任何分支裡被使用之前，一定已經有值。
+    conn = get_db_connection()
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 3. 優先鎖定正確的對話室 ID：前端有指定就用指定的，沒有才退回「該用戶最新一筆」
+    target_session_id = session_id
+    if not target_session_id:
+        session_row = conn.execute("SELECT id FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", (user_id,)).fetchone()
+        if session_row:
+            target_session_id = session_row['id']
+
     if action == "reply":
-        # 3. 透過 WebSocket 直接廣播客服訊息給指定用戶 (標記 role 為 admin 讓前台辨識)
-        socketio.emit('chat_reply', {'session_id': user_id, 'reply': message, 'role': 'admin'})
+        if not message.strip():
+            conn.close()
+            return jsonify({"error": "缺少訊息內容"}), 400
 
-        # 4. 建立資料庫連線，將真人回覆永久寫入 SQLite，且不再和 ai 混淆
-        conn = get_db_connection()
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # 5. 優先使用指定的 session_id，若無則查找最新一筆
-        target_session_id = session_id
-        if not target_session_id:
-            session_row = conn.execute("SELECT id FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", (user_id,)).fetchone()
-            if session_row:
-                target_session_id = session_row['id']
-        
+        # 4. 將回覆訊息以 admin 角色存入 messages 資料表
         if target_session_id:
-        # 6. 將回覆訊息以 admin 角色存入 messages 資料表
-            conn.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", (target_session_id, 'admin', message, current_time))
+            conn.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                         (target_session_id, 'admin', message, current_time))
             conn.commit()
+        conn.close()
 
-        # 7. 優化核心：客服一旦回覆，立刻將閒置計時器歸零重新計算
+        # 5. 透過 WebSocket 廣播，並夾帶 target_session_id 避免串房
+        socketio.emit('chat_reply', {
+            'session_id': user_id,
+            'chat_session_id': target_session_id,
+            'reply': message,
+            'role': 'admin'
+        })
+
+        # 6. 優化核心：客服一旦回覆，立刻將閒置計時器歸零重新計算
         # 【SA v2.1 調整】：time 已改在檔案最上方 import，這裡不再重複 import
         from state_manager import handoff_start_times
         if user_id in handoff_start_times and handoff_start_times[user_id].get("handoff_start_time"):
@@ -176,36 +193,38 @@ def admin_reply():
         return jsonify({"status": "success", "msg": "已傳送真人回覆"})
 
     elif action == "end_human":
-        # 8. 結束真人模式：引入狀態機與廣播模組，準備重置狀態與切換前端 UI
+        # 7. 結束真人模式：引入狀態機與廣播模組，準備重置狀態與切換前端 UI
         from state_manager import human_handoff, handoff_collect_taxid, handoff_start_times, human_lock
         from websocket_manager import broadcast_state_change
 
-        # 9. 強制清除該用戶在狀態機內的所有鎖定與計時標記
+        # 8. 強制清除該用戶在狀態機內的所有鎖定與計時標記
         human_handoff.pop(user_id, None)
         handoff_collect_taxid.pop(user_id, None)
         handoff_start_times.pop(user_id, None)
         human_lock.pop(user_id, None)
 
-        # 10. 將「真人服務結束」的系統通知寫入資料庫，確保歷史紀錄完整
-        conn = get_db_connection()
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        session_row = conn.execute("SELECT id FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", (user_id,)).fetchone()
-        if session_row:
-            latest_session_id = session_row['id']
-            conn.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", (latest_session_id, 'ai', "【系統通知】真人服務結束，AI 已重新上線。", current_time))
+        # 9. 將「真人服務結束」的系統通知寫入資料庫，確保歷史紀錄完整
+        if target_session_id:
+            conn.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                         (target_session_id, 'ai', "【系統通知】真人服務結束，AI 已重新上線。", current_time))
             conn.commit()
         conn.close()
 
-        # 11. 透過 WebSocket 推播系統通知，並廣播狀態切換讓前端 UI 解除鎖定
-        socketio.emit('chat_reply', {'session_id': user_id, 'reply': "【系統通知】真人服務結束，AI 已重新上線。"})
+        # 10. 透過 WebSocket 推播系統通知，同樣夾帶 target_session_id
+        socketio.emit('chat_reply', {
+            'session_id': user_id,
+            'chat_session_id': target_session_id,
+            'reply': "【系統通知】真人服務結束，AI 已重新上線。"
+        })
         broadcast_state_change(user_id, 'ai')
         return jsonify({"status": "success", "msg": "已切換回 AI 模式"})
 
-    # 12. 【SA v2.1 修正】：補上未知 action 的回傳。
+    # 11. 【SA v2.1 修正】：補上未知 action 的回傳。
     # 舊版只有 reply / end_human 兩個分支，如果前端不小心送了第三種 action，
     # 函式會走到底而回傳 None，Flask 會直接丟出
     # 「The view function did not return a valid response」的 500 錯誤，
     # 而且訊息很難聯想到是 action 打錯字造成的。
+    conn.close()
     return jsonify({"error": f"未知的 action：{action}（目前只支援 reply / end_human）"}), 400
 # ============================
 # 真人客服後台 API 區塊結束

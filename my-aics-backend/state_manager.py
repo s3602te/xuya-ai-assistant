@@ -75,7 +75,8 @@ def send_websocket_reply(user_id, session_id, message, options=None):
         except Exception as e:
             print(f"[DB Error] {e}")
 
-    payload = {'session_id': user_id, 'reply': message}
+    # payload 補上 chat_session_id，讓前端能辨別該回覆屬於哪一個對話窗
+    payload = {'session_id': user_id, 'chat_session_id': session_id, 'reply': message}
     if options:
         payload['options'] = options
     socketio.emit('chat_reply', payload)
@@ -139,16 +140,17 @@ def process_actual_logic(conv_key):
         broadcast_state_change(user_id, 'ai') 
         return
 
-    # 4. 判斷是否處於真人模式 (靜音 AI)：若正在真人服務中，將閒置計時器歸零，並阻擋 AI 回應
-    is_silence_mode = human_handoff.get(conv_key) or human_lock.get(conv_key)
+    # 4. 判斷是否處於真人模式 (靜音 AI)：精準比對是否為「當前轉接的對話室 (session_id)」
+    active_handoff_session = handoff_start_times.get(conv_key, {}).get("session_id")
+    is_silence_mode = (human_handoff.get(conv_key) and session_id == active_handoff_session) or human_lock.get(conv_key)
     if is_silence_mode and not handoff_collect_taxid.get(conv_key):
         # 只要客人在真人模式下有傳送訊息，就將閒置計時器歸零
         if conv_key in handoff_start_times and handoff_start_times[conv_key].get("handoff_start_time"):
             handoff_start_times[conv_key]["handoff_start_time"] = time.time()
         return
 
-    # 5. 等待統編階段：檢查輸入格式是否正確，錯誤則重置計時器並提示，正確則進入轉接等候
-    if handoff_collect_taxid.get(conv_key):
+    # 5. 等待統編階段：只有「發起轉接的同一個對話室 (session_id)」輸入統編才處理，避免其他視窗誤觸發
+    if handoff_collect_taxid.get(conv_key) and handoff_context.get(conv_key, {}).get("session_id") == session_id:
         tax_id_input = user_message.strip()
         if not re.match(TAX_ID_PATTERN, tax_id_input):
             # 其實原本就有重新計時！現在加上明確的文字回饋，讓使用者知道時間重置了。
@@ -166,17 +168,18 @@ def process_actual_logic(conv_key):
         }
         
         send_websocket_reply(user_id, session_id, f"【系統通知】已收到統編「{tax_id_input}」，正在為您轉接真人客服，請稍候...")
-        broadcast_state_change(user_id, 'human')  
+        socketio.emit('state_update', {'session_id': user_id, 'chat_session_id': session_id, 'state': 'human'})
         return
 
-    # 6. 轉接確認階段：處理使用者對「是否轉接」的回答，若回答其他問題則取消轉接意圖繼續 AI 流程
-    if handoff_pending.get(conv_key):
+    # 6. 轉接確認階段：處理使用者對「是否轉接」的回答，記錄當前對話室 ID
+    if handoff_pending.get(conv_key) and handoff_context.get(conv_key, {}).get("session_id") == session_id:
         handoff_pending_times.pop(conv_key, None) # 只要有回應就取消超時計時
         
         if any(re.search(p, user_message, re.IGNORECASE) for p in CONFIRM_YES_PATTERNS):
             handoff_pending.pop(conv_key, None)
             human_handoff[conv_key] = True
             handoff_collect_taxid[conv_key] = True
+            handoff_context[conv_key]["session_id"] = session_id # 鎖定發起轉接的房間
             handoff_start_times[conv_key] = {
                 "taxid_start_time": time.time(),
                 "handoff_start_time": None,
@@ -194,8 +197,11 @@ def process_actual_logic(conv_key):
 
     # 7. 觸發轉接意圖：比對使用者是否主動表達找真人的意圖，若有則跳出確認選項與計時
     if any(re.search(p, user_message, re.IGNORECASE) for p in HANDOFF_PATTERNS):
+        if human_handoff.get(conv_key) or handoff_collect_taxid.get(conv_key):
+            send_websocket_reply(user_id, session_id, "【系統通知】您目前已有專屬真人服務進行中，請回到原對話繼續諮詢。")
+            return
         handoff_pending[conv_key] = True
-        handoff_context[conv_key] = {"trigger": user_message, "user_id": user_id}
+        handoff_context[conv_key] = {"trigger": user_message, "user_id": user_id, "session_id": session_id}
         handoff_pending_times[conv_key] = {"time": time.time(), "session_id": session_id}
         send_websocket_reply(user_id, session_id, "【系統通知】是否轉接真人客服？", options=["是", "否"])
         return

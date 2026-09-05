@@ -29,6 +29,10 @@ function App() {
 
   // 3. 會話 (Session) 與訊息狀態管理
   const [currentSessionId, setCurrentSessionId] = useState(null) // 追蹤當前對話的唯一識別碼
+  const currentSessionIdRef = useRef(currentSessionId)          // 避免閉包陷阱，即時追蹤當前對話 ID
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId
+  }, [currentSessionId])
   const [chatHistory, setChatHistory] = useState([])             // 儲存側邊欄歷史對話清單
   const [messages, setMessages] = useState([                     // 儲存當前畫面的對話內容，並設定預設歡迎詞
     { role: 'ai', text: '你好！我是這位張序亞的專屬 AI 助理。您可以問我任何關於他專案、技術或開發過程的問題！' }
@@ -160,6 +164,11 @@ function App() {
     socket.on('chat_reply', (data) => {
       console.log('📩 收到 WebSocket 訊息：', data)
       if (data.session_id === userId) {
+        // 核心過濾：若推播的訊息屬於其他對話室，僅更新側邊欄列表，不干擾當前畫面
+        if (data.chat_session_id && data.chat_session_id !== currentSessionIdRef.current) {
+          fetchSessions()
+          return
+        }
         // 解除按鈕鎖定與思考中動畫
         setIsLoading(false)
 
@@ -189,6 +198,10 @@ function App() {
     socket.on('state_update', (data) => {
       console.log('📡 收到狀態切換廣播：', data)
       if (data.session_id === userId) {
+        // 核心隔離：若廣播帶有特定的 chat_session_id，且不是當前分頁開啟的房間，則不切換當前視窗顏色
+        if (data.chat_session_id && data.chat_session_id !== currentSessionIdRef.current) {
+          return
+        }
         setIsHumanMode(data.state === 'human')
       }
     })
