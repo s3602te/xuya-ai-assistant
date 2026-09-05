@@ -30,6 +30,9 @@ services:
 
     # 4. 系統環境變數注入 (Environment Variables)
     environment:
+      # 時區設定：強制指定容器為台灣台北時區 (UTC+8)，避免 datetime 產生 8 小時落差導致計時倒數失效
+      - TZ=Asia/Taipei
+      
       # 網路橋接設定：讓容器內的 Python 服務能透過 host.docker.internal 穿透容器網路，精準存取宿主機上運行的 Ollama
       # 告訴 Docker 內的 Python，去「宿主機 (你的電腦)」的 11434 Port 找 Ollama
       - OLLAMA_API_BASE_URL=http://host.docker.internal:11434

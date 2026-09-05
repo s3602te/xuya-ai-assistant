@@ -10,5 +10,6 @@ services:
     volumes:
       - ./xuya_vdb:/app/xuya_vdb
     environment:
+      - TZ=Asia/Taipei
       - OLLAMA_API_BASE_URL=http://host.docker.internal:11434
       - CUDA_VISIBLE_DEVICES=""
