@@ -43,6 +43,7 @@
 #           模型名稱、次數上限、逾時秒數不再寫死在核心邏輯檔裡。
 # ==========================================
 import re
+import ast
 import copy
 from typing import Annotated, Sequence, TypedDict, Literal, List, Dict
 from pydantic import BaseModel, Field
@@ -1366,7 +1367,11 @@ def math_node(state: AgentState):
         "6. 【題目問了好幾件事時】請用分號 ; 隔開多條算式，每條算式對應一個問題。"
         "例如「60顆蘋果分給9個人，每人幾顆又剩幾顆」→ 60 // 9 ; 60 % 9。"
         "如果題目同時問了兩種東西（蘋果和檸檬），就四條都寫出來："
-        "60 // 9 ; 60 % 9 ; 40 // 9 ; 40 % 9。\n"
+        "60 // 9 ; 60 % 9 ; 40 // 9 ; 40 % 9。"
+        "【絕對禁止】把兩種不同東西的商加在一起，例如「大魚70條、小魚30條分給7人，"
+        "每人幾條大魚、幾條小魚」【絕對不可以】寫成 (70 // 7) + (30 // 7)，"
+        "正確寫法一樣是四條分開的算式：70 // 7 ; 70 % 7 ; 30 // 7 ; 30 % 7。"
+        "只要題目問的是「幾個 A、幾個 B」這種並列的兩種東西，答案就一定要分開，不能合併相加。\n"
         "7. 除了分號之外，【不要】輸出任何其他符號或文字，"
         "特別是不要在算式前面加冒號、等號或「答案」兩個字。\n"
         "8. 【題目給的每個數字都要用到】：如果題目寫了 60、40、9 三個數字，"
@@ -1505,6 +1510,42 @@ def math_node(state: AgentState):
 
     syntax_ok = all(_syntax_of(e) for e in sub_exprs)
 
+    # ---- 【SA v4.5 新增】檢查 1.5：禁止把兩種不同東西的商/餘數直接加在一起 ----
+    #
+    # 實測翻車（大魚小魚分配題）：
+    #   「大魚70條、小魚30條，平分給7個人，每個人可以分到幾條大魚、幾條小魚？」
+    #   模型吐出 ((70 // 7) + (30 // 7))，把「大魚每人幾條」和「小魚每人幾條」
+    #   這兩個題目明確要求【分開回答】的量加總成一個數字 14。
+    #   語法檢查、運算檢查、數字溯源、數字完整性，四道既有檢查全部通過
+    #   （因為 70、30、7 都確實來自題目，算式也真的有在運算）——
+    #   問題不在「數字對不對」，是在「該分開的量被錯誤合併」。
+    #
+    # 這題本來就有規則 6 的提示詞範例（蘋果／檸檬分開算），
+    # 但換一種措辭（大魚／小魚、用「幾條 X、幾條 Y」的句型）小模型就沒有類推過去。
+    # 這正是這個專案一路以來的教訓：教規則不保證每次都被遵守，
+    # 只要有辦法寫成程式碼可以驗證的「不變條件」，就不要只依賴提示詞。
+    #
+    # 這裡的不變條件很具體：一條算式的【最外層】如果是「兩個取整除或取餘數的結果相加」，
+    # 幾乎不可能是正確答案 —— 分配題要的是「各自」的商或餘數，不是把商數加總。
+    # 用 AST 直接檢查算式的語法樹結構，比在提示詞裡多舉一個例子更可靠。
+    def _is_merged_quotients(e: str) -> bool:
+        try:
+            node = ast.parse(e, mode="eval").body
+        except Exception:
+            return False
+
+        def _is_quotient_or_remainder(n):
+            return isinstance(n, ast.BinOp) and isinstance(n.op, (ast.FloorDiv, ast.Mod))
+
+        return (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Add)
+            and _is_quotient_or_remainder(node.left)
+            and _is_quotient_or_remainder(node.right)
+        )
+
+    merged_quantities_ok = not any(_is_merged_quotients(e) for e in sub_exprs)
+
     # ---- 檢查 2：語意有效性 —— 必須真的在「算」東西 ----
     has_operation = all(
         bool(re.search(r'[\+\-\*/%]', e)) or bool(re.search(r'\b(comb|perm|factorial)\s*\(', e))
@@ -1591,11 +1632,19 @@ def math_node(state: AgentState):
         if question_numbers and unused_numbers:
             completeness_ok = False
 
-    if not syntax_ok or not has_operation or not provenance_ok or not combinatorics_ok or not completeness_ok:
+    if not syntax_ok or not has_operation or not provenance_ok or not combinatorics_ok or not completeness_ok or not merged_quantities_ok:
         if not syntax_ok:
             reason = f"算式含有非數學字元(抽取結果：{expr!r})"
         elif not has_operation:
             reason = f"算式沒有任何運算，只是一個孤立的數字(抽取結果：{expr!r})，這代表它沒有真的在計算"
+        elif not merged_quantities_ok:
+            reason = (
+                f"算式把兩種不同東西的商或餘數直接加在一起了(抽取結果：{expr[:80]!r})。"
+                f"題目問的是「幾條/幾個 A、幾條/幾個 B」這種要【分開回答】的量，"
+                f"不可以用 (a // n) + (b // n) 這種方式合併成一個數字。"
+                f"請把每一種東西的商與餘數都拆成獨立的算式，用分號 ; 隔開，例如："
+                f"70 // 7 ; 70 % 7 ; 30 // 7 ; 30 % 7。"
+            )
         elif not combinatorics_ok:
             reason = (f"題目並不是在問組合或排列，卻使用了 comb/perm/factorial"
                       f"(抽取結果：{expr[:80]!r})。分配、平分、相差這類題目請用 + - * / // % 就好")
