@@ -704,7 +704,7 @@ function App() {
                   e.stopPropagation();
                   setActiveMenuId(activeMenuId === history.id ? null : history.id);
                 }}
-                className="p-1 px-2 rounded opacity-100 md:opacity-0 group-hover:opacity-100 hover:bg-black/30 transition flex-shrink-0"
+                className="p-1 px-2 rounded opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:bg-black/30 transition flex-shrink-0"
               >
                 ⋮
               </button>
